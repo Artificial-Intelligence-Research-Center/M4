@@ -1,0 +1,12 @@
+# Model folders
+model/
+output_dir/
+output_logs/
+data/
+# Checkpoints
+*.pth
+*.pt
+# Logs*.log
+*.log
+# Tensorboard logs
+runs/

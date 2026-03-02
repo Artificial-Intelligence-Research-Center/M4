@@ -61,6 +61,23 @@ def get_file_paths(data_path):
     return image_paths
 
 
+def copy_with_unique_name(src_path, dest_dir):
+    """Copy src_path into dest_dir. If a file with the same name exists,
+    append an incremental suffix to the basename until the name is unique.
+    Returns the destination path used.
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+    base = os.path.basename(src_path)
+    name, ext = os.path.splitext(base)
+    dest_path = os.path.join(dest_dir, base)
+    counter = 1
+    while os.path.exists(dest_path):
+        dest_path = os.path.join(dest_dir, f"{name}_{counter}{ext}")
+        counter += 1
+    shutil.copy(src_path, dest_path)
+    return dest_path
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Count images in a dataset")
     parser.add_argument("--data_path", type=str, required=True, help="Path to the dataset directory")
@@ -121,11 +138,11 @@ if __name__ == "__main__":
         test_data = image_paths[class_name][training_num + validation_num:]
 
         for path in training_data:
-            shutil.copy(path, class_train_dir)
+            copy_with_unique_name(path, class_train_dir)
         for path in validation_data:
-            shutil.copy(path, class_val_dir)
+            copy_with_unique_name(path, class_val_dir)
         for path in test_data:
-            shutil.copy(path, class_test_dir)
+            copy_with_unique_name(path, class_test_dir)
 
     # Verify the new dataset
     new_total_images, new_class_counts = count_images(output_dir)
