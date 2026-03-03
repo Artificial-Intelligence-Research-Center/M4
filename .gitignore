@@ -10,3 +10,4 @@ data/
 *.log
 # Tensorboard logs
 runs/
+output*/

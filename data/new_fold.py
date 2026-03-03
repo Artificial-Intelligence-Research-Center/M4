@@ -1,5 +1,6 @@
 import os
 import shutil
+import math
 import random
 import argparse
 from tqdm import tqdm
@@ -51,7 +52,24 @@ def get_file_paths(data_path):
         if len(root.split('/')) != 3:
             continue
         _, data_split, class_name = root.split('/')
-        if data_split not in ['train', 'val', 'test']:
+        if data_split not in ['train', 'val']:
+            continue
+        if class_name not in image_paths:
+            image_paths[class_name] = []
+        for filename in files:
+            if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif')):
+                image_paths[class_name].append(os.path.join(root, filename))
+    return image_paths
+
+
+def get_test_file_paths(data_path):
+    image_paths = {}
+    for root, _, files in os.walk(data_path):
+        # Split image by class
+        if len(root.split('/')) != 3:
+            continue
+        _, data_split, class_name = root.split('/')
+        if data_split not in ['test']:
             continue
         if class_name not in image_paths:
             image_paths[class_name] = []
@@ -82,6 +100,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Count images in a dataset")
     parser.add_argument("--data_path", type=str, required=True, help="Path to the dataset directory")
     parser.add_argument("--seed", type=int, help="Random seed for shuffling data")
+    parser.add_argument("--fold", type=int, help="Number of folds for cross validation")
     return parser.parse_args()
 
 
@@ -103,62 +122,71 @@ if __name__ == "__main__":
 
     # Get file paths
     image_paths = get_file_paths(args.data_path)
-
-    # Shuffle data
+    test_image_paths = get_test_file_paths(args.data_path)
+    # Shuffle the data for each class
+    random.seed(args.seed)
     for class_name in image_paths:
-        image_paths[class_name].sort()  # Ensure consistent order before shuffling
-        if args.seed is not None:
-            random.seed(args.seed)
-            random.shuffle(image_paths[class_name])
+        random.shuffle(image_paths[class_name])
 
-    # Create new folders and distribute images
-    training_set_dir = os.path.join(output_dir, 'train')
-    validation_set_dir = os.path.join(output_dir, 'val')
-    test_set_dir = os.path.join(output_dir, 'test')
-    os.makedirs(training_set_dir, exist_ok=True)
-    os.makedirs(validation_set_dir, exist_ok=True)
-    os.makedirs(test_set_dir, exist_ok=True)
+    for fold_num in range(args.fold):
+        # Create new folders and distribute images
+        training_set_dir = os.path.join(f"{output_dir}_fold{fold_num}", 'train')
+        validation_set_dir = os.path.join(f"{output_dir}_fold{fold_num}", 'val')
+        test_set_dir = os.path.join(f"{output_dir}_fold{fold_num}", 'test')
+
+        # Check if the training set directory already exists to avoid overwriting existing data
+        if os.path.exists(training_set_dir):
+            raise ValueError(f"Training set directory {training_set_dir} already exists. Please choose a different seed or remove the existing directory.")
+
+        os.makedirs(training_set_dir, exist_ok=True)
+        os.makedirs(validation_set_dir, exist_ok=True)
+        os.makedirs(test_set_dir, exist_ok=True)
 
 
-    # Distribute images according to the counts in class_counts
-    for class_name in tqdm(class_counts['train'].keys()):
-        class_train_dir = os.path.join(training_set_dir, class_name)
-        class_val_dir = os.path.join(validation_set_dir, class_name)
-        class_test_dir = os.path.join(test_set_dir, class_name)
-        os.makedirs(class_train_dir, exist_ok=True)
-        os.makedirs(class_val_dir, exist_ok=True)
-        os.makedirs(class_test_dir, exist_ok=True)
+        for class_name in tqdm(class_counts['train'].keys()):
+            class_train_dir = os.path.join(training_set_dir, class_name)
+            class_val_dir = os.path.join(validation_set_dir, class_name)
+            class_test_dir = os.path.join(test_set_dir, class_name)
+            os.makedirs(class_train_dir, exist_ok=True)
+            os.makedirs(class_val_dir, exist_ok=True)
+            os.makedirs(class_test_dir, exist_ok=True)
 
-        training_num = class_counts['train'][class_name]
-        validation_num = class_counts['val'][class_name]
-        test_num = class_counts['test'][class_name]
+            total_num = class_counts['train'][class_name] + class_counts['val'][class_name]
+            training_num = math.floor(total_num * ((args.fold - 1) / args.fold))  # Ensure that training_num is at least 1
+            # validation_num = math.ceil(total_num / args.fold)  # Ensure that validation_num is at least 1
 
-        training_data = image_paths[class_name][:training_num]
-        validation_data = image_paths[class_name][training_num:training_num + validation_num]
-        test_data = image_paths[class_name][training_num + validation_num:]
+            training_data = image_paths[class_name][:training_num]
+            validation_data = image_paths[class_name][training_num:]
+            test_data = test_image_paths[class_name]
 
-        for path in training_data:
-            copy_with_unique_name(path, class_train_dir)
-        for path in validation_data:
-            copy_with_unique_name(path, class_val_dir)
-        for path in test_data:
-            copy_with_unique_name(path, class_test_dir)
+            for path in training_data:
+                copy_with_unique_name(path, class_train_dir)
+            for path in validation_data:
+                copy_with_unique_name(path, class_val_dir)
+            for path in test_data:
+                copy_with_unique_name(path, class_test_dir)
 
-    # Verify the new dataset
-    new_total_images, new_class_counts = count_images(output_dir)
-    print(f"Total images in new dataset: {new_total_images}")
-    print("Class distribution in new dataset:")
-    for root_class, class_dict in new_class_counts.items():
-        for class_name, count in class_dict.items():
-            print(f"{root_class}/{class_name}: {count}", end=' | ')
-        print()  # New line after each root class
+            # Rotate the data for the next fold
+            # print(image_paths[class_name][:training_num])
+            # print(image_paths[class_name][training_num:])
+            image_paths[class_name] = image_paths[class_name][training_num:] + image_paths[class_name][:training_num]
+            # input()
 
-    for split in class_counts:
-        for class_name in class_counts[split]:
-            if split not in new_class_counts or class_name not in new_class_counts[split]:
-                raise ValueError(f"Class {class_name} is missing in split {split} of the new dataset")
-            count1 = class_counts[split][class_name]
-            count2 = new_class_counts[split][class_name]
-            if count1 != count2:
-                raise ValueError(f"Mismatch in {split} - {class_name}: {count1} vs {count2}")
-    print("New dataset verification passed.")
+            # Verify the new dataset
+        new_total_images, new_class_counts = count_images(f"{output_dir}_fold{fold_num}")
+        print(f"Total images in new dataset: {new_total_images}")
+        print("Class distribution in new dataset:")
+        for root_class, class_dict in new_class_counts.items():
+            for class_name, count in class_dict.items():
+                print(f"{root_class}/{class_name}: {count}", end=' | ')
+            print()  # New line after each root class
+
+        for split in class_counts:
+            for class_name in class_counts[split]:
+                if split not in new_class_counts or class_name not in new_class_counts[split]:
+                    raise ValueError(f"Class {class_name} is missing in split {split} of the new dataset")
+                count1 = class_counts[split][class_name]
+                count2 = new_class_counts[split][class_name]
+                if count1 != count2:
+                    raise ValueError(f"Mismatch in {split} - {class_name}: {count1} vs {count2}")
+        print("New dataset verification passed.")
