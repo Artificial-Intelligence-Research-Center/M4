@@ -11,9 +11,12 @@ conda activate retfound
 
 ```
 pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
-git clone https://github.com/rmaphoh/RETFound/
-cd RETFound
-pip install -r requirements.txt
 pip install ipykernel
+pip install torchmetrics
+pip install termcolor
 python -m ipykernel install --user --name retfound --display-name "Python (retfound)"
+git clone https://github.com/Artificial-Intelligence-Research-Center/M4.git
+cd M4
+pip install -r requirements.txt
+huggingface-cli login --token YOUR_HUGGINGFACE_TOKEN
 ```
