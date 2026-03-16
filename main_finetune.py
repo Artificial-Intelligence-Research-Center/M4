@@ -170,6 +170,13 @@ def main(args, criterion):
             drop_path_rate=args.drop_path,
             global_pool=args.global_pool,
         )
+    elif args.model in ['Pixio']:
+        model = models.__dict__["Pixio"](
+            img_size=args.input_size,
+            num_classes=args.nb_classes,
+            drop_path_rate=args.drop_path,
+            global_pool=args.global_pool,
+        )
     else:
         model = models.__dict__[args.model](
             num_classes=args.nb_classes,
@@ -181,7 +188,7 @@ def main(args, criterion):
     if args.finetune and not args.eval:
         print(f"Preparing to load pre-trained weights: {args.finetune}")
 
-        if args.model in ["Dinov3", "Dinov2", "MAE"]:
+        if args.model in ["Dinov3", "Dinov2", "MAE", "Pixio"]:
             checkpoint_path = args.finetune  # local path
         elif args.model in ["RETFound_dinov2", "RETFound_mae"]:
             print(f"Downloading pre-trained weights from Hugging Face Hub: {args.finetune}")
@@ -198,12 +205,19 @@ def main(args, criterion):
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         print(f"Loaded pre-trained checkpoint from: {checkpoint_path}")
 
-        if args.model in ["Dinov3", "Dinov2", "MAE"]:
-            checkpoint_model = checkpoint
-        elif args.model == "RETFound_dinov2":
+        # if args.model in ["Dinov3", "Dinov2", "MAE"]:
+        #     checkpoint_model = checkpoint
+        # elif args.model == "RETFound_dinov2":
+        #     checkpoint_model = checkpoint["teacher"]
+        # else:  # RETFound_mae
+        #     checkpoint_model = checkpoint["model"]
+
+        if args.model == "RETFound_dinov2":
             checkpoint_model = checkpoint["teacher"]
-        else:  # RETFound_mae
+        elif 'model' in checkpoint:
             checkpoint_model = checkpoint["model"]
+        else:  # RETFound_mae
+            checkpoint_model = checkpoint
 
         # -- Key hygiene
         checkpoint_model = {k.replace("backbone.", ""): v for k, v in checkpoint_model.items()}

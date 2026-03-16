@@ -5,14 +5,26 @@
 port=$1
 
 test_models=(
-    "test.pth"
+    # Pixio
     # "our_pixio/epoch-20.pth"
     # "our_pixio/epoch-40.pth"
     # "our_pixio/epoch-60.pth"
     # "our_pixio/epoch-80.pth"
+    # "our_dis_pixio/epoch-20.pth"
+    # "our_dis_pixio/epoch-40.pth"
+    # "our_dis_pixio/epoch-60.pth"
+    # "our_dis_pixio/epoch-80.pth"
+
+    # Dinov3
+    # "our_dinov3/epoch_29.pt"
+    # "our_dinov3/epoch_50.pt"
+    # "our_dinov3/epoch_74.pt"
+    # "our_dinov3/exported_last.pt"
+
+    # Baselines
     # "pixio_vitl16.pth"
     # "vit_large_patch16_224.pth"
-    # "mae_pretrain_vit_large.pth"
+    "mae_pretrain_vit_large.pth"
     # "RETFound_mae_natureCFP"
     # "RETFound_mae_meh"
     # "RETFound_mae_shanghai"
@@ -24,20 +36,33 @@ test_models=(
 
 test_datasets=(
   "APTOS2019"
-  "MESSIDOR2"
-  "IDRiD_data"
-  "Glaucoma_fundas"
-  "PAPILA"
-  "Retina"
+#   "MESSIDOR2"
+#   "IDRiD_data"
+#   "Glaucoma_fundus"
+#   "PAPILA"
+#   "Retina"
+    # "MIL"
 )
 
 declare -A MODEL=(
-    ["test.pth"]="MAE"
-    # ["our_pixio/epoch-20.pth"]="MAE"
-    # ["our_pixio/epoch-40.pth"]="MAE"
-    # ["our_pixio/epoch-60.pth"]="MAE"
-    # ["our_pixio/epoch-80.pth"]="MAE"
-    ["pixio_vitl16.pth"]="MAE"
+    # Pixio
+    ["our_pixio/epoch-20.pth"]="Pixio"
+    ["our_pixio/epoch-40.pth"]="Pixio"
+    ["our_pixio/epoch-60.pth"]="Pixio"
+    ["our_pixio/epoch-80.pth"]="Pixio"
+    ["our_dis_pixio/epoch-20.pth"]="Pixio"
+    ["our_dis_pixio/epoch-40.pth"]="Pixio"
+    ["our_dis_pixio/epoch-60.pth"]="Pixio"
+    ["our_dis_pixio/epoch-80.pth"]="Pixio"
+    ["pixio_vitl16.pth"]="Pixio"
+
+    # Dinov3
+    ["our_dinov3/epoch_29.pt"]="Dinov3"
+    ["our_dinov3/epoch_50.pt"]="Dinov3"
+    ["our_dinov3/epoch_74.pt"]="Dinov3"
+    ["our_dinov3/exported_last.pt"]="Dinov3"
+
+    # Baselines
     ["vit_large_patch16_224.pth"]="MAE"
     ["mae_pretrain_vit_large.pth"]="MAE"
     ["RETFound_mae_natureCFP"]="RETFound_mae"
@@ -51,12 +76,24 @@ declare -A MODEL=(
 
 # finetune -> model_arch
 declare -A ARCH=(
-    ["test.pth"]="MAE"
-    # ["our_pixio/epoch-20.pth"]="MAE"
-    # ["our_pixio/epoch-40.pth"]="MAE"
-    # ["our_pixio/epoch-60.pth"]="MAE"
-    # ["our_pixio/epoch-80.pth"]="MAE"
-    ["pixio_vitl16.pth"]="MAE"
+    # pixio
+    ["our_pixio/epoch-20.pth"]="Pixio"
+    ["our_pixio/epoch-40.pth"]="Pixio"
+    ["our_pixio/epoch-60.pth"]="Pixio"
+    ["our_pixio/epoch-80.pth"]="Pixio"
+    ["our_dis_pixio/epoch-20.pth"]="Pixio"
+    ["our_dis_pixio/epoch-40.pth"]="Pixio"
+    ["our_dis_pixio/epoch-60.pth"]="Pixio"
+    ["our_dis_pixio/epoch-80.pth"]="Pixio"
+    ["pixio_vitl16.pth"]="Pixio"
+
+    # dinov3
+    ["our_dinov3/epoch_29.pt"]="dinov3_vitl16"
+    ["our_dinov3/epoch_50.pt"]="dinov3_vitl16"
+    ["our_dinov3/epoch_74.pt"]="dinov3_vitl16"
+    ["our_dinov3/exported_last.pt"]="dinov3_vitl16"
+
+    # Baselines
     ["vit_large_patch16_224.pth"]="MAE"
     ["mae_pretrain_vit_large.pth"]="MAE"
     ["RETFound_mae_natureCFP"]="retfound_mae"
@@ -72,9 +109,10 @@ declare -A CLASS=(
     ["APTOS2019"]="5"
     ["MESSIDOR2"]="5"
     ["IDRiD_data"]="5"
-    ["Glaucoma_fundas"]="3"
+    ["Glaucoma_fundus"]="3"
     ["PAPILA"]="3"
     ["Retina"]="4"
+    ["MIL"]="2"
 )
 
 
@@ -87,7 +125,9 @@ for CUR_MODEL in "${test_models[@]}"; do
             
 
             echo "🚀 $MODEL_NAME | $MODEL_ARCH | $CUR_MODEL | $CUR_DATASET | $NUM_CLASS | $FOLD"
+            # DATA_PATH="./data/${CUR_DATASET}"
             DATA_PATH="./data/5_fold_${CUR_DATASET}/${CUR_DATASET}_seed42_fold${FOLD}"
+            # task="${MODEL_ARCH}_${CUR_MODEL}_${CUR_DATASET}_FOLD${FOLD}_origin_finetune"
             task="${MODEL_ARCH}_${CUR_MODEL}_${CUR_DATASET}_FOLD${FOLD}_finetune"
 
             torchrun --nproc_per_node=1 --master_port="${port}" main_finetune.py \
@@ -96,7 +136,7 @@ for CUR_MODEL in "${test_models[@]}"; do
               --finetune "${CUR_MODEL}" \
               --savemodel \
               --global_pool \
-              --batch_size 24 \
+              --batch_size 16 \
               --world_size 1 \
               --epochs 50 \
               --nb_classes "${NUM_CLASS}" \
