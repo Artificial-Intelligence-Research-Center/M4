@@ -1,3 +1,0 @@
-MODEL,MODEL_ARCH,FINETUNE,DATASET,NUM_CLASS,SEED
-Dinov3,dinov3_vitl16,dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth,Retina,4,1
-RETFound_mae,retfound_mae,RETFound_mae_natureCFP,APTOS2019,5,1

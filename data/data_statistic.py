@@ -8,10 +8,11 @@ def count_images(data_path):
     class_counts = {}
 
     for root, dirs, files in tqdm(os.walk(data_path), desc="Counting images"):
-        if len(root.split('/')) != 3:
+        print(f"Processing directory: {root}")
+        if len(root.split('/')) != 4:
             continue
 
-        dataset_name, data_split, class_name = root.split('/')
+        _, dataset_name, data_split, class_name = root.split('/')
         if data_split not in ['train', 'val', 'test']:
             continue
 
@@ -44,3 +45,15 @@ if __name__ == "__main__":
         for class_name, count in class_dict.items():
             print(f"{root_class}/{class_name}: {count}", end=' | ')
         print()  # New line after each root class
+
+    # Count the total number of images in the training set
+    train_total = sum(class_counts.get('train', {}).values())
+    print(f"Total images in training set: {train_total}")
+
+    # Count the total number of images in the validation set
+    val_total = sum(class_counts.get('val', {}).values())
+    print(f"Total images in validation set: {val_total}")
+
+    # Count the total number of images in the test set
+    test_total = sum(class_counts.get('test', {}).values())
+    print(f"Total images in test set: {test_total}")

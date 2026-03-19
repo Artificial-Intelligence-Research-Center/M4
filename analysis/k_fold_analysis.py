@@ -98,6 +98,8 @@ if __name__ == "__main__":
         'MESSIDOR2',
         'PAPILA',
         'Retina',
+        'MIL',
+        'SL'
     ]
 
     # Initialize a dictionary to store the results
@@ -120,13 +122,13 @@ if __name__ == "__main__":
     test_result.to_csv(output_csv_path)
 
     # Print the test scores
+    print('accuracy mean and std:')
     for dataset_name in test_result.index.get_level_values("Dataset Name").unique():
         print(f"{dataset_name} mean std")
         dataset_result = test_result.loc[dataset_name]
         for exp_name in dataset_result.index:
             mean_std = dataset_result.loc[exp_name]
             metric = 'accuracy'
-            # metric = 'roc_auc'
             print(exp_name, mean_std[metric, 'mean'], mean_std[metric, 'std'])
             # for metric in ['accuracy']:
             #     mean_value = mean_std.loc[metric, "mean"]
@@ -135,4 +137,14 @@ if __name__ == "__main__":
     # Draw the test scores
     # draw_test_scores(test_result, args.output_dir)
 
+    print("\n\n")
 
+    print('roc_auc mean and std:')
+    for dataset_name in test_result.index.get_level_values("Dataset Name").unique():
+        print(f"{dataset_name} mean std")
+        dataset_result = test_result.loc[dataset_name]
+        for exp_name in dataset_result.index:
+            mean_std = dataset_result.loc[exp_name]
+            metric = 'roc_auc'
+            print(exp_name, mean_std[metric, 'mean'], mean_std[metric, 'std'])
+    
