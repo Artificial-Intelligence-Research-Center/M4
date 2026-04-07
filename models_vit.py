@@ -136,6 +136,18 @@ def RETFound_mae(**kwargs):
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
+def GastroNet(**kwargs):
+    model = VisionTransformer(
+        patch_size=16, 
+        embed_dim=768,     # 從 1024 降至 768
+        depth=12,         # 從 24 層減半至 12 層
+        num_heads=12,      # 從 16 頭降至 12 頭
+        mlp_ratio=4, 
+        qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        **kwargs
+    )
+    return model
 
 
 def Dinov2(args, **kwargs):

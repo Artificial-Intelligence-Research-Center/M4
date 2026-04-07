@@ -25,9 +25,9 @@ def get_test_files(log_dir, dataset_names):
         if name_parse:
             exp_name = name_parse.group(1)
             dataset_name = name_parse.group(2)
-            seed = name_parse.group(3)
+            fold = name_parse.group(3)
             test_file = os.path.join(log_dir, folder, "metrics_test.csv")
-            test_file_list.append((exp_name, dataset_name, seed, test_file))
+            test_file_list.append((exp_name, dataset_name, fold, test_file))
         else:
             print(f"Folder name does not match the expected pattern: {folder}")
     return test_file_list
@@ -46,8 +46,8 @@ def read_and_parse_csv(test_file):
 
 
 def build_dataframe(test_file_list):
-    data_frame = pd.DataFrame(columns=["Experiment Name", "Dataset Name", "Seed"])
-    for exp_name, dataset_name, seed, test_file in test_file_list:
+    data_frame = pd.DataFrame(columns=["Experiment Name", "Dataset Name", "Fold"])
+    for exp_name, dataset_name, fold, test_file in test_file_list:
         if not os.path.exists(test_file):
             # raise FileNotFoundError(f"Test file not found: {test_file}")
             print(f"Test file not found: {test_file}")
@@ -61,7 +61,7 @@ def build_dataframe(test_file_list):
                 data_frame[col] = None
 
         # Append the values to the data frame
-        new_row = {"Experiment Name": exp_name, "Dataset Name": dataset_name, "Seed": seed}
+        new_row = {"Experiment Name": exp_name, "Dataset Name": dataset_name, "Fold": fold}
         for col in columns_names:
             new_row[col] = col_info[col]
         data_frame.loc[len(data_frame)] = new_row
@@ -70,7 +70,7 @@ def build_dataframe(test_file_list):
 
 def test_scores(dataframe):
     # Compute the mean and standard deviation for each dataset
-    metrics = [col for col in dataframe.columns if col not in ["Experiment Name", "Dataset Name", "Seed", "Epoch"]]
+    metrics = [col for col in dataframe.columns if col not in ["Experiment Name", "Dataset Name", "Fold", "Epoch"]]
 
     # Group the data frame by dataset name and experiment name, and compute the mean and standard deviation for each metric
     # dataframe_grouped = dataframe.groupby(["Dataset Name", "Experiment Name"])[metrics].agg(["mean", "std"])
@@ -98,8 +98,9 @@ if __name__ == "__main__":
         'MESSIDOR2',
         'PAPILA',
         'Retina',
-        'MIL',
-        'SL'
+        # 'HK',
+        # 'MIL',
+        # 'SL'
     ]
 
     # Initialize a dictionary to store the results

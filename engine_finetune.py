@@ -1,4 +1,5 @@
 import os
+import pandas as pd
 import csv
 import torch
 import torch.nn as nn
@@ -39,7 +40,7 @@ def train_one_epoch(
     if log_writer:
         print(f'log_dir: {log_writer.log_dir}')
     
-    for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, f'Epoch: [{epoch}]')):
+    for data_iter_step, (samples, targets, _) in enumerate(metric_logger.log_every(data_loader, print_freq, f'Epoch: [{epoch}]')):
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
         
@@ -90,9 +91,10 @@ def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_write
     
     model.eval()
     true_onehot, pred_onehot, true_labels, pred_labels, pred_softmax = [], [], [], [], []
+    paths = []
     
     for batch in metric_logger.log_every(data_loader, 10, f'{mode}:'):
-        images, target = batch[0].to(device, non_blocking=True), batch[-1].to(device, non_blocking=True)
+        images, target, path = batch[0].to(device, non_blocking=True), batch[1].to(device, non_blocking=True), batch[2]
         target_onehot = F.one_hot(target.to(torch.int64), num_classes=num_class)
         
         with torch.cuda.amp.autocast():
@@ -108,7 +110,9 @@ def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_write
         true_labels.extend(target.cpu().numpy())
         pred_labels.extend(output_label.detach().cpu().numpy())
         pred_softmax.extend(output_.detach().cpu().numpy())
+        paths.extend(path)
     
+
     accuracy = accuracy_score(true_labels, pred_labels)
     hamming = hamming_loss(true_onehot, pred_onehot)
     jaccard = jaccard_score(true_onehot, pred_onehot, average='macro')
@@ -131,6 +135,21 @@ def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_write
           f' Average Precision: {average_precision:.4f}, Kappa: {kappa:.4f}, Score: {score:.4f}')
     
     metric_logger.synchronize_between_processes()
+
+    # Prepare predictions for saving
+    if isinstance(data_loader.dataset, torch.utils.data.Subset):
+        classes = data_loader.dataset.dataset.classes
+    else:
+        classes = data_loader.dataset.classes
+    
+    # pred_softmax: list of [num_class]
+    df = pd.DataFrame(pred_softmax, columns=[f"{cls}_score" for cls in classes])
+    # 加上路徑
+    df.insert(0, "image_path", paths)
+    df["pred_label"] = pred_labels
+    df["true_label"] = true_labels
+    df["pred_class"] = [classes[i] for i in pred_labels]
+    df["true_class"] = [classes[i] for i in true_labels]
     
     results_path = os.path.join(args.output_dir, args.task, f'metrics_{mode}.csv')
     file_exists = os.path.isfile(results_path)
@@ -145,4 +164,4 @@ def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_write
         cm.plot(cmap=plt.cm.Blues, number_label=True, normalized=True, plot_lib="matplotlib")
         plt.savefig(os.path.join(args.output_dir, args.task, 'confusion_matrix_test.jpg'), dpi=600, bbox_inches='tight')
     
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, score
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, score, df

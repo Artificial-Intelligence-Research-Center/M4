@@ -160,6 +160,10 @@ def main(args, criterion):
     torch.manual_seed(seed)
     np.random.seed(seed)
     cudnn.benchmark = True
+    # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+    # torch.use_deterministic_algorithms(True)
 
     # ---- Build model
     if args.model in ["RETFound_mae", "MAE"]:
@@ -177,6 +181,13 @@ def main(args, criterion):
             drop_path_rate=args.drop_path,
             global_pool=args.global_pool,
         )
+    elif args.model in ["GastroNet"]:
+        model = models.__dict__["GastroNet"](
+            img_size=args.input_size,
+            num_classes=args.nb_classes,
+            drop_path_rate=args.drop_path,
+            global_pool=args.global_pool,
+        )
     else:
         model = models.__dict__[args.model](
             num_classes=args.nb_classes,
@@ -188,7 +199,7 @@ def main(args, criterion):
     if args.finetune and not args.eval:
         print(f"Preparing to load pre-trained weights: {args.finetune}")
 
-        if args.model in ["Dinov3", "Dinov2", "MAE", "Pixio"]:
+        if args.model in ["Dinov3", "Dinov2", "MAE", "Pixio", "GastroNet", "dinov2_base"]:
             checkpoint_path = args.finetune  # local path
         elif args.model in ["RETFound_dinov2", "RETFound_mae"]:
             print(f"Downloading pre-trained weights from Hugging Face Hub: {args.finetune}")
@@ -406,7 +417,7 @@ def main(args, criterion):
             log_writer=log_writer, args=args
         )
 
-        val_stats, val_score = evaluate(
+        val_stats, val_score, pred_outputs = evaluate(
             data_loader_val, model, device, args, epoch, mode="val",
             num_class=args.nb_classes, log_writer=log_writer
         )
@@ -414,11 +425,14 @@ def main(args, criterion):
         if max_score < val_score:
             max_score = val_score
             best_epoch = epoch
+            csv_path = os.path.join(args.output_dir, args.task, f'predictions_val.csv')
+            pred_outputs.to_csv(csv_path, index=False, encoding='utf-8-sig')
             if args.output_dir and args.savemodel:
                 misc.save_model(
                     args=args, model=model, model_without_ddp=model_without_ddp,
                     optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch, mode="best"
                 )
+
         print(f"Best epoch = {best_epoch}, Best score = {max_score:.4f}")
 
         if log_writer is not None:
@@ -441,10 +455,12 @@ def main(args, criterion):
     model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
     model.to(device)
     print(f"Test with the best model, epoch = {checkpoint.get('epoch', -1)}:")
-    _test_stats, _auc_roc = evaluate(
+    _test_stats, _auc_roc, pred_outputs = evaluate(
         data_loader_test, model, device, args, -1, mode="test",
         num_class=args.nb_classes, log_writer=None
     )
+    csv_path = os.path.join(args.output_dir, args.task, f'predictions_test.csv')
+    pred_outputs.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

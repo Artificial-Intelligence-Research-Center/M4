@@ -6,6 +6,10 @@ port=$1
 
 test_models=(
     # Pixio
+    # "our_dis_pixio/pixio_vitl16_epoch-100.pth"
+    # "our_dis_pixio/pixio_vitl16_epoch-120.pth"
+    # "our_dis_pixio/pixio_vitl16_epoch-140.pth"
+    # "our_dis_pixio/pixio_vitl16_epoch-160.pth"
     # "our_pixio/epoch-20.pth"
     # "our_pixio/epoch-40.pth"
     # "our_pixio/epoch-60.pth"
@@ -20,11 +24,16 @@ test_models=(
     # "our_dinov3/epoch_50.pt"
     # "our_dinov3/epoch_74.pt"
     # "our_dinov3/exported_last.pt"
+    # "our_dinov3/185199_keep_vitl.pth"
+    # "our_dinov3/148159_keep_vitl.pth"
+    # "our_dinov3/111119_keep_vitl.pth"
+    # "our_dinov3/74079_keep_vitl.pth"
+    # "our_dinov3/37039_keep_vitl.pth"
 
     # Baselines
     # "pixio_vitl16.pth"
     # "vit_large_patch16_224.pth"
-    "mae_pretrain_vit_large.pth"
+    # "mae_pretrain_vit_large.pth"
     # "RETFound_mae_natureCFP"
     # "RETFound_mae_meh"
     # "RETFound_mae_shanghai"
@@ -35,17 +44,22 @@ test_models=(
 )
 
 test_datasets=(
-  "APTOS2019"
-#   "MESSIDOR2"
-#   "IDRiD_data"
-#   "Glaucoma_fundus"
-#   "PAPILA"
-#   "Retina"
-    # "MIL"
+    "APTOS2019"
+    "MESSIDOR2"
+    "IDRiD_data"
+    "Glaucoma_fundus"
+    "PAPILA"
+    "Retina"
+    "MIL"
+    "SL"
 )
 
 declare -A MODEL=(
     # Pixio
+    ["our_dis_pixio/pixio_vitl16_epoch-100.pth"]="Pixio"
+    ["our_dis_pixio/pixio_vitl16_epoch-120.pth"]="Pixio"
+    ["our_dis_pixio/pixio_vitl16_epoch-140.pth"]="Pixio"
+    ["our_dis_pixio/pixio_vitl16_epoch-160.pth"]="Pixio"
     ["our_pixio/epoch-20.pth"]="Pixio"
     ["our_pixio/epoch-40.pth"]="Pixio"
     ["our_pixio/epoch-60.pth"]="Pixio"
@@ -61,6 +75,11 @@ declare -A MODEL=(
     ["our_dinov3/epoch_50.pt"]="Dinov3"
     ["our_dinov3/epoch_74.pt"]="Dinov3"
     ["our_dinov3/exported_last.pt"]="Dinov3"
+    ["our_dinov3/185199_keep_vitl.pth"]="Dinov3"
+    ["our_dinov3/148159_keep_vitl.pth"]="Dinov3"
+    ["our_dinov3/111119_keep_vitl.pth"]="Dinov3"
+    ["our_dinov3/74079_keep_vitl.pth"]="Dinov3"
+    ["our_dinov3/37039_keep_vitl.pth"]="Dinov3"
 
     # Baselines
     ["vit_large_patch16_224.pth"]="MAE"
@@ -77,6 +96,10 @@ declare -A MODEL=(
 # finetune -> model_arch
 declare -A ARCH=(
     # pixio
+    ["our_dis_pixio/pixio_vitl16_epoch-100.pth"]="Pixio"
+    ["our_dis_pixio/pixio_vitl16_epoch-120.pth"]="Pixio"
+    ["our_dis_pixio/pixio_vitl16_epoch-140.pth"]="Pixio"
+    ["our_dis_pixio/pixio_vitl16_epoch-160.pth"]="Pixio"
     ["our_pixio/epoch-20.pth"]="Pixio"
     ["our_pixio/epoch-40.pth"]="Pixio"
     ["our_pixio/epoch-60.pth"]="Pixio"
@@ -92,6 +115,11 @@ declare -A ARCH=(
     ["our_dinov3/epoch_50.pt"]="dinov3_vitl16"
     ["our_dinov3/epoch_74.pt"]="dinov3_vitl16"
     ["our_dinov3/exported_last.pt"]="dinov3_vitl16"
+    ["our_dinov3/185199_keep_vitl.pth"]="dinov3_vitl16"
+    ["our_dinov3/148159_keep_vitl.pth"]="dinov3_vitl16"
+    ["our_dinov3/111119_keep_vitl.pth"]="dinov3_vitl16"
+    ["our_dinov3/74079_keep_vitl.pth"]="dinov3_vitl16"
+    ["our_dinov3/37039_keep_vitl.pth"]="dinov3_vitl16"
 
     # Baselines
     ["vit_large_patch16_224.pth"]="MAE"
@@ -113,6 +141,27 @@ declare -A CLASS=(
     ["PAPILA"]="3"
     ["Retina"]="4"
     ["MIL"]="2"
+    ["SL"]="2"
+)
+
+declare -A epochs=(
+    # ["APTOS2019"]="50"
+    # ["MESSIDOR2"]="50"
+    # ["IDRiD_data"]="50"
+    # ["Glaucoma_fundus"]="50"
+    # ["PAPILA"]="50"
+    # ["Retina"]="50"
+    # ["MIL"]="100"
+    # ["SL"]="100"
+    
+    ["APTOS2019"]="2"
+    ["MESSIDOR2"]="2"
+    ["IDRiD_data"]="2"
+    ["Glaucoma_fundus"]="2"
+    ["PAPILA"]="2"
+    ["Retina"]="2"
+    ["MIL"]="2"
+    ["SL"]="2"
 )
 
 
@@ -122,6 +171,7 @@ for CUR_MODEL in "${test_models[@]}"; do
             MODEL_NAME="${MODEL["$CUR_MODEL"]}"
             MODEL_ARCH="${ARCH["$CUR_MODEL"]}"
             NUM_CLASS="${CLASS["$CUR_DATASET"]}"
+            NUM_EPOCHS="${epochs["$CUR_DATASET"]}"
             
 
             echo "🚀 $MODEL_NAME | $MODEL_ARCH | $CUR_MODEL | $CUR_DATASET | $NUM_CLASS | $FOLD"
@@ -136,11 +186,12 @@ for CUR_MODEL in "${test_models[@]}"; do
               --finetune "${CUR_MODEL}" \
               --savemodel \
               --global_pool \
-              --batch_size 16 \
+              --batch_size 24 \
               --world_size 1 \
-              --epochs 50 \
+              --epochs "${NUM_EPOCHS}" \
               --nb_classes "${NUM_CLASS}" \
               --data_path "${DATA_PATH}" \
+              --output_dir "./test" \
               --input_size 224 \
               --task "${task}" \
               --adaptation finetune
