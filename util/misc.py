@@ -287,13 +287,16 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
     return total_norm
 
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mode):
+def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mode, SFT=False):
     output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
     os.makedirs(os.path.join(args.output_dir, args.task), exist_ok=True)
     if loss_scaler is not None:
         if mode == 'best':
-            checkpoint_paths = [os.path.join(args.output_dir, args.task, 'checkpoint-best.pth')]
+            if not SFT:
+                checkpoint_paths = [os.path.join(args.output_dir, args.task, f'checkpoint-best.pth')]
+            else:
+                checkpoint_paths = [os.path.join(args.output_dir, args.task, f'{epoch}_checkpoint-best.pth')]
         else:
             checkpoint_paths = [os.path.join(args.output_dir, args.task, 'checkpoint-latest.pth')]
         for checkpoint_path in checkpoint_paths:
@@ -322,7 +325,10 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mo
             to_save = {
                 'model': model_without_ddp.state_dict(),
                 'epoch': epoch, }
-            torch.save(to_save, os.path.join(args.output_dir, args.task, "checkpoint-best.pth"))
+            if not SFT:
+                torch.save(to_save, os.path.join(args.output_dir, args.task, f"checkpoint-best.pth"))
+            else:
+                torch.save(to_save, os.path.join(args.output_dir, args.task, f"{epoch}_checkpoint-best.pth"))
         else:
             if epoch == args.epochs - 1:
                 to_save = {

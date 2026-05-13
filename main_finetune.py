@@ -131,6 +131,7 @@ def get_args_parser():
     parser.add_argument("--norm", default="IMAGENET", type=str)
     parser.add_argument("--enhance", action="store_true", default=False)
     parser.add_argument("--datasets_seed", default=2026, type=int)
+    parser.add_argument("--SFT", action="store_true", default=False, help="Save model each epoch for SFT")
 
     return parser
 
@@ -166,7 +167,7 @@ def main(args, criterion):
     # torch.use_deterministic_algorithms(True)
 
     # ---- Build model
-    if args.model in ["RETFound_mae", "MAE"]:
+    if args.model in ["RETFound_mae", "MAE", "SL_VIT"]:
         # model = models.__dict__[args.model](
         model = models.__dict__["RETFound_mae"](
             img_size=args.input_size,
@@ -199,7 +200,7 @@ def main(args, criterion):
     if args.finetune and not args.eval:
         print(f"Preparing to load pre-trained weights: {args.finetune}")
 
-        if args.model in ["Dinov3", "Dinov2", "MAE", "Pixio", "GastroNet", "dinov2_base"]:
+        if args.model in ["Dinov3", "Dinov2", "MAE", "Pixio", "GastroNet", "dinov2_base", "SL_VIT"]:
             checkpoint_path = args.finetune  # local path
         elif args.model in ["RETFound_dinov2", "RETFound_mae"]:
             print(f"Downloading pre-trained weights from Hugging Face Hub: {args.finetune}")
@@ -223,7 +224,7 @@ def main(args, criterion):
         # else:  # RETFound_mae
         #     checkpoint_model = checkpoint["model"]
 
-        if args.model == "RETFound_dinov2":
+        if args.model == "RETFound_dinov2" or args.model == "GastroNet":
             checkpoint_model = checkpoint["teacher"]
         elif 'model' in checkpoint:
             checkpoint_model = checkpoint["model"]
@@ -234,6 +235,9 @@ def main(args, criterion):
         checkpoint_model = {k.replace("backbone.", ""): v for k, v in checkpoint_model.items()}
         checkpoint_model = {k.replace("mlp.w12.", "mlp.fc1."): v for k, v in checkpoint_model.items()}
         checkpoint_model = {k.replace("mlp.w3.", "mlp.fc2."): v for k, v in checkpoint_model.items()}
+        if args.model in ["MAE", "Pixio", "GastroNet"]:
+            checkpoint_model = {k.replace("norm.weight", "fc_norm.weight"): v for k, v in checkpoint_model.items()}
+            checkpoint_model = {k.replace("norm.bias", "fc_norm.bias"): v for k, v in checkpoint_model.items()}
 
         # -- Remove classifier if shape mismatched
         state_dict = model.state_dict()
@@ -422,15 +426,18 @@ def main(args, criterion):
             num_class=args.nb_classes, log_writer=log_writer
         )
 
-        if max_score < val_score:
+        if max_score < val_score or args.SFT:
             max_score = val_score
             best_epoch = epoch
-            csv_path = os.path.join(args.output_dir, args.task, f'predictions_val.csv')
+            if args.SFT:
+                csv_path = os.path.join(args.output_dir, args.task, f'predictions_epoch_{epoch}.csv')
+            else:
+                csv_path = os.path.join(args.output_dir, args.task, f'predictions_val.csv')
             pred_outputs.to_csv(csv_path, index=False, encoding='utf-8-sig')
             if args.output_dir and args.savemodel:
                 misc.save_model(
                     args=args, model=model, model_without_ddp=model_without_ddp,
-                    optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch, mode="best"
+                    optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch, mode="best", SFT=args.SFT,
                 )
 
         print(f"Best epoch = {best_epoch}, Best score = {max_score:.4f}")

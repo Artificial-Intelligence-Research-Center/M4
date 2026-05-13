@@ -5,51 +5,31 @@ from multiprocessing import Process, Semaphore, Queue
 import GPUtil
 
 # ==== 配置設定 ====
-TEST_FOLDERS = [
-    "baseline_models",
-    # "gastro_dinov3"
-    # "our_dinov3"
-    # "gastroscopy_baseline",
-    # "our_pixio_dis"
-    # "dinov2_base",
-    # "dinov3_cs"
-    # "dinov3_0414"
-    # "sft_default_param",
-    # "sft_mae_param",
-    # "sft_sft_param",
-    # "imagenet_sft_default_param",
-    # "imagenet_sft_mae_param",
-    # "imagenet_sft_sft_param",
-    # "sft_10_20_mae"
-    # "retfound_sft_eval_models"
-    # "dinov3_0429",
-    # "only_vit",
-    # "sft_fundus_mae_param"
-    # "sft_imagenet2fundus_models/eval_models"
+SFT_FOLDERS = [
+    # "baseline_models",
+    # "sft_imagenet_models"
+    "imagenet_sft_models_0430"
 ]
 
-TEST_DATASETS = [
-    "APTOS2019",
-    "MESSIDOR2",
-    "IDRiD_data",
-    "Glaucoma_fundus",
-    "PAPILA",
-    "Retina",
-    # "MIL",
-    # "SL",
-    # "HK",
+
+SFT_DATASET = [
+    "SFT_AOD",
+    # "imagenet"
 ]
 
 
 CLASS_MAP = {
     "APTOS2019": "5", "MESSIDOR2": "5", "IDRiD_data": "5",
     "Glaucoma_fundus": "3", "PAPILA": "3", "Retina": "4",
-    "MIL": "2", "SL": "2", "HK": "23",
+    "MIL": "2", "SL": "2", "HK": "23", "SFT_AOD": "8",
+    "imagenet": "1000",
 }
+
 
 def get_free_gpus():
     """ 取得目前顯存佔用低於 10% 的 GPU ID """
     return GPUtil.getAvailable(order='first', limit=8, maxLoad=0.1, maxMemory=0.1)
+
 
 def run_experiment(gpu_id, cmd, task_name, output_dir):
     """ 執行單一實驗任務 """
@@ -64,6 +44,7 @@ def run_experiment(gpu_id, cmd, task_name, output_dir):
         process.wait()
     
     print(f"✅ 任務完成: {task_name} (GPU {gpu_id})")
+
 
 def worker(task_queue, gpu_semaphore):
     """ 監聽隊列並分配 GPU """
@@ -94,6 +75,7 @@ def worker(task_queue, gpu_semaphore):
         # 簡單做法是在 run_experiment 結束後手動釋放（需傳入 semaphore）
         # 或是在主程式維護一個 thread pools
 
+
 def get_model_info(model_path):
     """ 根據模型路徑解析出模型名稱、架構等資訊 """
     if "retfound_mae" in model_path.lower():
@@ -113,7 +95,7 @@ def get_model_info(model_path):
     elif "mae" in model_path.lower():
         return "MAE", "MAE"
     elif "vit_large_patch16" in model_path.lower():
-        return "SL_VIT", "SL_VIT"
+        return "MAE", "MAE"
     else:
         raise ValueError(f"無法解析模型資訊: {model_path}")
 
@@ -121,8 +103,8 @@ if __name__ == "__main__":
     output_dir = "test"
 
     # 0. 先收集所有模型檔案
-    test_models = []
-    # test_models.extend(
+    sft_models = []
+    # sft_models.extend(
     #     [
     #         'RETFound_mae_natureCFP',
     #         'RETFound_mae_meh',
@@ -131,56 +113,49 @@ if __name__ == "__main__":
     #         'RETFound_dinov2_shanghai'
     #     ]
     # )
-    for path in TEST_FOLDERS:
+    for path in SFT_FOLDERS:
         model_ckpts = [f for f in os.listdir(path) if f.endswith(".pth")]
-        test_models.extend([os.path.join(path, ckpt) for ckpt in model_ckpts])
+        sft_models.extend([os.path.join(path, ckpt) for ckpt in model_ckpts])
 
     tasks = []
     # 1. 產生所有任務指令
-    for cur_model in test_models:
-        for cur_dataset in TEST_DATASETS:
-            for fold in [0, 1, 2, 3, 4]:
-            # for fold in [0]:
-                model_name, model_arch = get_model_info(cur_model)
-                num_class = CLASS_MAP[cur_dataset]
-                
-                data_path = f"./data/5_fold_{cur_dataset}/{cur_dataset}_seed42_fold{fold}"
-                task_id = f"{model_arch}_{cur_model.replace('/', '_')}_{cur_dataset}_FOLD{fold}_finetune"
-                
-                # 組合指令 (注意：這裡不需要 --master_port，因為我們用 CUDA_VISIBLE_DEVICES 隔離)
-                # Default
-                cmd = (
-                    f"python main_finetune.py "
-                    f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
-                    f"--savemodel --global_pool --batch_size 24 --epochs 50 "
-                    f"--nb_classes {num_class} --data_path {data_path} "
-                    f"--output_dir {output_dir}/default_param --input_size 224 --task {task_id} --adaptation finetune"
-                )
-                if not os.path.exists(f"{output_dir}/default_param/{task_id}"):
-                    print(f"加入任務: {task_id}")
-                    tasks.append((cmd, task_id))
+    for cur_model in sft_models:
+        for cur_dataset in SFT_DATASET:
+            model_name, model_arch = get_model_info(cur_model)
+            num_class = CLASS_MAP[cur_dataset]
+            
+            data_path = f"./data/{cur_dataset}"
+            task_id = f"{model_arch}_{cur_model.replace('/', '_')}_{cur_dataset}"
+            
+            # Default
+            # cmd = (
+            #     f"python main_finetune.py "
+            #     f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
+            #     f"--savemodel --global_pool --batch_size 24 --epochs 1 --warmup_epochs 0 "
+            #     f"--nb_classes {num_class} --data_path {data_path} "
+            #     f"--output_dir {output_dir}/default_param --input_size 224 --task {task_id} --adaptation finetune --SFT"
+            # )
+            # tasks.append((cmd, task_id))
 
-                # paper
-                # cmd = (
-                #     f"python main_finetune.py "
-                #     f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
-                #     f"--savemodel --global_pool --batch_size 24 --epochs 50 --blr 5e-4 "
-                #     f"--nb_classes {num_class} --data_path {data_path} "
-                #     f"--output_dir {output_dir}/paper_param --input_size 224 --task {task_id} --adaptation finetune"
-                # )
-                # tasks.append((cmd, task_id))
+            # paper
+            # cmd = (
+            #     f"python main_finetune.py "
+            #     f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
+            #     f"--savemodel --global_pool --batch_size 24 --epochs 50 --blr 5e-4 "
+            #     f"--nb_classes {num_class} --data_path {data_path} "
+            #     f"--output_dir {output_dir}/paper_param --input_size 224 --task {task_id} --adaptation finetune --SFT"
+            # )
+            # tasks.append((cmd, task_id))
 
-                # MAE
-                cmd = (
-                    f"python main_finetune.py "
-                    f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
-                    f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 "
-                    f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
-                    f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation finetune"
-                )
-                if not os.path.exists(f"{output_dir}/mae_param/{task_id}"):
-                    print(f"加入任務: {task_id}")
-                    tasks.append((cmd, task_id))
+            # MAE
+            cmd = (
+                f"python main_finetune.py "
+                f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
+                f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 --warmup_epochs 10 "
+                f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
+                f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation finetune --SFT"
+            )
+            tasks.append((cmd, task_id))
 
 
     # 2. 自動偵測 GPU 數量
