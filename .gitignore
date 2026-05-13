@@ -10,4 +10,5 @@ data/
 *.log
 # Tensorboard logs
 runs/
-output*/
+
+__pycache__/
