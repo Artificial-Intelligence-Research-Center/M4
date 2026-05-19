@@ -1,5 +1,7 @@
 ## Multistage Modular Medical Models (M4)
 
+[ENGLISH](README_EN.md) | [中文](README.md)
+
 本計畫以「超越 Scaling Law，以資料效率與可信賴性為核心」為研究主軸，致力於建立一套適用於醫療影像的模組化視覺基礎模型（M4, Modular Medical Foundation Models），回應真實醫療場域中資料稀缺、標註成本高與隱私限制等關鍵挑戰。
 
 傳統 AI 發展仰賴海量資料與模型規模擴張，但在醫療領域中，此路徑往往難以落實。本計畫採取「策略優於規模」的思維，結合自監督學習（Self-Supervised Learning）、多階段轉移學習（Multi-stage Transfer Learning）與任務導向微調（Task-specific Fine-Tuning），讓 AI 能在僅仰賴少量專家標註資料的情況下，逐步學習並建立具臨床價值的醫學語意理解能力。
@@ -151,7 +153,7 @@ Baseline效果比較如下表
 
 - RetFound dinov2 meh表現明顯超越其他模型
 - 在自然影像模型中dinov3表現最好，dinov2表現次之
-- 透過MAE based或Supervised Learning預訓練的模型不論自然影像模型或是Retfound的continual pretraining表現都較Dino系列更差
+- 透過MAE based預訓練的模型不論自然影像模型或是Retfound的continual pretraining表現都較Dino系列更差
 
 ## Exp2: Supervised Fune-Tuning(SFT)
 
