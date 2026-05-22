@@ -51,6 +51,16 @@ pip install -r requirements.txt
 - [RETFound_dinov2_meh (Zhou et al., 2025)](https://github.com/rmaphoh/RETFound)
 - [RETFound_dinov2_shanghai (Zhou et al., 2025)](https://github.com/rmaphoh/RETFound)
 
+### Pre-training pipelines
+
+![[assets/Pre-training-pipelines.png]](assets/Pre-training-pipelines.png)
+
+我們把預訓練流程分成4類，並比較其效果，分別為：
+1. Pipeline 1: 只使用自然影像資料進行預訓練
+2. Pipeline 2: Pipeline1之後，再使用醫療影像資料進行DAP
+3. Pipeline 3: Pipeline1之後，再使用醫療影像進行SFT
+4. Pipeline 4: Pipeline2之後，再使用醫療影像進行SFT
+
 
 ## Dataset
 
@@ -115,6 +125,22 @@ python SFT_script.py
 
 ## Exp1: Performance of baseline models
 
+在exp1我們比較Pipeline 1與Pipeline 2的模型在6個資料集的表現
+
+Pipeline 1的模型包含：
+- Dinov2
+- Dinov3
+- Pixio
+- MAE_pretrain_vit_large
+- Vit-large-patch16-224
+
+Pipeline 2的模型包含：
+- RETFound_mae_natureCFP
+- RETFound_mae_meh
+- RETFound_mae_shanghai
+- RETFound_dinov2_meh
+- RETFound_dinov2_shanghai
+
 ### Experimental Setup
 
 - **5-fold:** 每個資料集皆進行5-fold測試，每個模型對5個fold各訓練一次，每個fold得到一個validation分數最高的模型，並用validation表現最好的模型進行test set測試，最後計算5個fold的test分數之平均值與標準差，作為評斷模型好壞之標準
@@ -141,7 +167,7 @@ python SFT_script.py
 | **RETFound 論文超參數**         | **85.24 ±0.08**  | 76.84 ±1.08      | 82.84 ±0.88            | 70.50 ±3.28     | **65.63 ±2.96**  | **84.08 ±3.19** |
 | **MAE 預設超參數**              | 85.16 ±0.67      | **77.07 ±0.88**  | **86.92 ±0.63**        | 71.16 ±1.72     | 62.91 ±4.63      | 82.65 ±3.31     |
 
-### Experimental results 
+### Experimental results
 
 Baseline效果比較如下表
 
@@ -155,9 +181,21 @@ Baseline效果比較如下表
 - 在自然影像模型中dinov3表現最好，dinov2表現次之
 - 透過MAE based預訓練的模型不論自然影像模型或是Retfound的continual pretraining表現都較Dino系列更差
 
-## Exp2: Supervised Fune-Tuning(SFT)
+## Exp2: Supervised Fine-Tuning (SFT)
 
-將預訓練模型透過SFT訓練於Imagenet-1k與AOD資料集，並對兩者進行比較
+在exp2我們加入SFT將Pipeline 1與Pipeline 2的模型微調於imagenet-1k與AOD資料集，觀察SFT對於不同預訓練流程的模型在下游任務的影響
+
+其中Pipeline 3的模型包含：
+- Dinov2
+- Dinov3
+- Pixio
+- MAE_pretrain_vit_large
+- Vit-large-patch16-224
+
+Pipeline 4的模型包含：
+- RETFound_dinov2_meh
+- RETFound_dinov2_shanghai
+
 
 ### Experimental Setup
 
@@ -175,7 +213,8 @@ Baseline效果比較如下表
 
 	|Model\Dataset|APTOS2019|MESSIDOR2|Glaucoma fundus|Retina|IDRID_Data|PAPILA|
 	|---|---|---|---|---|---|---|
-	|**DINOv2**|**0.8456**|**0.7681**|0.8013|0.7138|0.5786|0.7592|
+	|**RETFound dinov2 (meh) origin**|**0.8513**|**0.8572**|0.7631|0.7304|0.5942|0.8184|
+	|**DINOv2**|0.8456|0.7681|0.8013|0.7138|0.5786|0.7592|
 	|**DINOv3**|0.8396|0.7452|0.8370|0.7227|0.5845|0.7918|
 	|**Pixio**|0.8347|0.7308|0.7871|0.6475|0.4796|0.7306|
 	|**RetFound (meh)**|0.8451|0.7669|0.8417|**0.7448**|**0.6019**|**0.8204**|
