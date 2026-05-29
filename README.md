@@ -51,15 +51,14 @@ pip install -r requirements.txt
 - [RETFound_dinov2_meh (Zhou et al., 2025)](https://github.com/rmaphoh/RETFound)
 - [RETFound_dinov2_shanghai (Zhou et al., 2025)](https://github.com/rmaphoh/RETFound)
 
-### Pre-training pipelines
+### Adaptation pipelines
 
-![[assets/Pre-training-pipelines.png]](assets/Pre-training-pipelines.png)
+![[assets/Adaptation-pipelines.png]](assets/Adaptation-pipelines.png)
 
-我們把預訓練流程分成4類，並比較其效果，分別為：
-1. Pipeline 1: 只使用自然影像資料進行預訓練
-2. Pipeline 2: Pipeline1之後，再使用醫療影像資料進行DAP
-3. Pipeline 3: Pipeline1之後，再使用醫療影像進行SFT
-4. Pipeline 4: Pipeline2之後，再使用醫療影像進行SFT
+除了直接利用Natural image pre-trained模型進行下游任務以外，我們也測試3種不同Adaptation方法的效果，分別為：
+1. DAP (DAP將直接使用RETFound官方提供的模型權重)
+2. SFT (SFT將額外在醫療影像或自然影像資料集上進行監督式微調)
+3. DAP + SFT (先進行DAP，再進行SFT)
 
 
 ## Dataset
@@ -127,14 +126,14 @@ python SFT_script.py
 
 在exp1我們比較Pipeline 1與Pipeline 2的模型在6個資料集的表現
 
-Pipeline 1的模型包含：
+其中無Adaptation的模型包含：
 - Dinov2
 - Dinov3
 - Pixio
 - MAE_pretrain_vit_large
 - Vit-large-patch16-224
 
-Pipeline 2的模型包含：
+進行DAP的模型包含：
 - RETFound_mae_natureCFP
 - RETFound_mae_meh
 - RETFound_mae_shanghai
@@ -185,14 +184,14 @@ Baseline效果比較如下表
 
 在exp2我們加入SFT將Pipeline 1與Pipeline 2的模型微調於imagenet-1k與AOD資料集，觀察SFT對於不同預訓練流程的模型在下游任務的影響
 
-其中Pipeline 3的模型包含：
+SFT的模型包含：
 - Dinov2
 - Dinov3
 - Pixio
 - MAE_pretrain_vit_large
 - Vit-large-patch16-224
 
-Pipeline 4的模型包含：
+DAP + SFT的模型包含：
 - RETFound_dinov2_meh
 - RETFound_dinov2_shanghai
 
@@ -211,14 +210,14 @@ Pipeline 4的模型包含：
 
 - SFT on Imagenet-1k Dataset
 
-	|Model\Dataset|APTOS2019|MESSIDOR2|Glaucoma fundus|Retina|IDRID_Data|PAPILA|
-	|---|---|---|---|---|---|---|
-	|**RETFound dinov2 (meh) origin**|**0.8513**|**0.8572**|0.7631|0.7304|0.5942|0.8184|
-	|**DINOv2**|0.8456|0.7681|0.8013|0.7138|0.5786|0.7592|
-	|**DINOv3**|0.8396|0.7452|0.8370|0.7227|0.5845|0.7918|
-	|**Pixio**|0.8347|0.7308|0.7871|0.6475|0.4796|0.7306|
-	|**RetFound (meh)**|0.8451|0.7669|0.8417|**0.7448**|**0.6019**|**0.8204**|
-	|**RetFound (shanghai)**|0.8484|0.7297|**0.8529**|0.6895|0.5942|0.7959|
+	| Model\Dataset                    | APTOS2019  | Glaucoma fundus | MESSIDOR2 | Retina     | IDRID_Data | PAPILA     |
+	| -------------------------------- | ---------- | --------------- | --------- | ---------- | ---------- | ---------- |
+	| **RETFound dinov2 (meh) w/o sft** | **0.8513** | **0.8572**          | 0.7631    | 0.7304     | 0.5942     | 0.8184     |
+	| **DINOv2**                       | 0.8456     | 0.8013          | **0.7681**    | 0.7138     | 0.5786     | 0.7592     |
+	| **DINOv3**                       | 0.8396     | 0.8370          | 0.7452    | 0.7227     | 0.5845     | 0.7918     |
+	| **Pixio**                        | 0.8347     | 0.7871          | 0.7308    | 0.6475     | 0.4796     | 0.7306     |
+	| **RetFound (meh)**               | 0.8451     | 0.8417          | 0.7669    | **0.7448** | **0.6019** | **0.8204** |
+	| **RetFound (shanghai)**          | 0.8484     | 0.8529     | 0.7297    | 0.6895     | 0.5942     | 0.7959     |
 
 ### Computational cost
 
