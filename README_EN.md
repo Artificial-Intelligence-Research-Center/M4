@@ -51,6 +51,16 @@ The following 10 models are used as baselines. Except for the RETFound model, pl
 - [RETFound_dinov2_meh (Zhou et al., 2025)](https://github.com/rmaphoh/RETFound)
 - [RETFound_dinov2_shanghai (Zhou et al., 2025)](https://github.com/rmaphoh/RETFound)
 
+### Adaptation pipelines
+
+![[assets/Adaptation-pipelines.png]](assets/Adaptation-pipelines.png)
+
+In addition to directly applying natural image pre-trained models to downstream tasks, we also evaluate three adaptation strategies:
+1. DAP (DAP directly uses model weights released by the official RETFound repository)
+2. SFT (SFT additionally performs supervised fine-tuning on medical image or natural image datasets)
+3. DAP + SFT (apply DAP first, then SFT)
+
+
 ## Dataset
 
 ### Fundus Datasets
@@ -114,6 +124,22 @@ python SFT_script.py
 
 ## Exp1: Performance of baseline models
 
+In Exp1, we compare the performance of models with Pipeline 1 and Pipeline 2 across 6 datasets.
+
+Models without adaptation include:
+- Dinov2
+- Dinov3
+- Pixio
+- MAE_pretrain_vit_large
+- Vit-large-patch16-224
+
+Models with DAP include:
+- RETFound_mae_natureCFP
+- RETFound_mae_meh
+- RETFound_mae_shanghai
+- RETFound_dinov2_meh
+- RETFound_dinov2_shanghai
+
 ### Experimental Setup
 
 - **5-fold:** Each dataset undergoes 5-fold testing. Each model is trained once for each of the 5 folds. The model with the highest validation score for each fold is used for test set evaluation. The average and standard deviation of the test scores across the 5 folds are used as the evaluation criteria.
@@ -156,7 +182,19 @@ Baseline performance comparison is shown in the tables below:
 
 ## Exp2: Supervised Fine-Tuning (SFT)
 
-Fine-tune pre-trained models on Imagenet-1k and AOD datasets and compare the two.
+In Exp2, we add SFT on Pipeline 1 and Pipeline 2 models using Imagenet-1k and AOD datasets, and observe how SFT affects downstream performance under different pre-training workflows.
+
+SFT models include:
+- Dinov2
+- Dinov3
+- Pixio
+- MAE_pretrain_vit_large
+- Vit-large-patch16-224
+
+DAP + SFT models include:
+- RETFound_dinov2_meh
+- RETFound_dinov2_shanghai
+
 
 ### Experimental Setup
 
@@ -172,13 +210,14 @@ Fine-tune pre-trained models on Imagenet-1k and AOD datasets and compare the two
 
 - SFT on Imagenet-1k Dataset
 
-	|Model\Dataset|APTOS2019|MESSIDOR2|Glaucoma fundus|Retina|IDRID_Data|PAPILA|
-	|---|---|---|---|---|---|---|
-	|**DINOv2**|**0.8456**|**0.7681**|0.8013|0.7138|0.5786|0.7592|
-	|**DINOv3**|0.8396|0.7452|0.8370|0.7227|0.5845|0.7918|
-	|**Pixio**|0.8347|0.7308|0.7871|0.6475|0.4796|0.7306|
-	|**RetFound (meh)**|0.8451|0.7669|0.8417|**0.7448**|**0.6019**|**0.8204**|
-	|**RetFound (shanghai)**|0.8484|0.7297|**0.8529**|0.6895|0.5942|0.7959|
+	| Model\Dataset                    | APTOS2019  | Glaucoma fundus | MESSIDOR2 | Retina     | IDRID_Data | PAPILA     |
+	| -------------------------------- | ---------- | --------------- | --------- | ---------- | ---------- | ---------- |
+	| **RETFound dinov2 (meh) w/o sft** | **0.8513** | **0.8572**      | 0.7631    | 0.7304     | 0.5942     | 0.8184     |
+	| **DINOv2**                       | 0.8456     | 0.8013          | **0.7681**| 0.7138     | 0.5786     | 0.7592     |
+	| **DINOv3**                       | 0.8396     | 0.8370          | 0.7452    | 0.7227     | 0.5845     | 0.7918     |
+	| **Pixio**                        | 0.8347     | 0.7871          | 0.7308    | 0.6475     | 0.4796     | 0.7306     |
+	| **RetFound (meh)**               | 0.8451     | 0.8417          | 0.7669    | **0.7448** | **0.6019** | **0.8204** |
+	| **RetFound (shanghai)**          | 0.8484     | 0.8529          | 0.7297    | 0.6895     | 0.5942     | 0.7959     |
 
 ### Computational cost
 
@@ -195,4 +234,4 @@ According to the [RETFound paper](https://www.researchsquare.com/article/rs-6080
 - Overall, whether fine-tuned on the AOD or Imagenet-1k datasets, dinov2 and RetFound (meh) outperform other models.
 - Fine-tuning on the AOD dataset achieves higher scores across all datasets compared to Imagenet-1k, and **models trained on Imagenet-1k do not surpass SOTA performance**.
 - Although dinov3 performs better than other natural image models without SFT, after SFT, it performs significantly worse than dinov2 on all datasets except Glaucoma_fundus.
-- Comparing the original RETFound_dinov2_meh (epoch 0) with the dinov2 model, even using the significantly lower-cost SFT method, better performance can be achieved on 4 out of 6 datasets, demonstrating that the SFT method can achieve results close to continual pretraining with lower costs.
+- Comparing the original RETFound_dinov2_meh (epoch 0) with the dinov2 model, even using the significantly lower-cost SFT method, better performance can be achieved on all datasets except Glaucoma fundus and PAPILA, demonstrating that the SFT method can achieve results close to continual pretraining with lower costs.

@@ -51,6 +51,15 @@ pip install -r requirements.txt
 - [RETFound_dinov2_meh (Zhou et al., 2025)](https://github.com/rmaphoh/RETFound)
 - [RETFound_dinov2_shanghai (Zhou et al., 2025)](https://github.com/rmaphoh/RETFound)
 
+### Adaptation pipelines
+
+![[assets/Adaptation-pipelines.png]](assets/Adaptation-pipelines.png)
+
+除了直接利用Natural image pre-trained模型進行下游任務以外，我們也測試3種不同Adaptation方法的效果，分別為：
+1. DAP (DAP將直接使用RETFound官方提供的模型權重)
+2. SFT (SFT將額外在醫療影像或自然影像資料集上進行監督式微調)
+3. DAP + SFT (先進行DAP，再進行SFT)
+
 
 ## Dataset
 
@@ -115,6 +124,22 @@ python SFT_script.py
 
 ## Exp1: Performance of baseline models
 
+在exp1我們比較Pipeline 1與Pipeline 2的模型在6個資料集的表現
+
+其中無Adaptation的模型包含：
+- Dinov2
+- Dinov3
+- Pixio
+- MAE_pretrain_vit_large
+- Vit-large-patch16-224
+
+進行DAP的模型包含：
+- RETFound_mae_natureCFP
+- RETFound_mae_meh
+- RETFound_mae_shanghai
+- RETFound_dinov2_meh
+- RETFound_dinov2_shanghai
+
 ### Experimental Setup
 
 - **5-fold:** 每個資料集皆進行5-fold測試，每個模型對5個fold各訓練一次，每個fold得到一個validation分數最高的模型，並用validation表現最好的模型進行test set測試，最後計算5個fold的test分數之平均值與標準差，作為評斷模型好壞之標準
@@ -141,7 +166,7 @@ python SFT_script.py
 | **RETFound 論文超參數**         | **85.24 ±0.08**  | 76.84 ±1.08      | 82.84 ±0.88            | 70.50 ±3.28     | **65.63 ±2.96**  | **84.08 ±3.19** |
 | **MAE 預設超參數**              | 85.16 ±0.67      | **77.07 ±0.88**  | **86.92 ±0.63**        | 71.16 ±1.72     | 62.91 ±4.63      | 82.65 ±3.31     |
 
-### Experimental results 
+### Experimental results
 
 Baseline效果比較如下表
 
@@ -155,9 +180,21 @@ Baseline效果比較如下表
 - 在自然影像模型中dinov3表現最好，dinov2表現次之
 - 透過MAE based預訓練的模型不論自然影像模型或是Retfound的continual pretraining表現都較Dino系列更差
 
-## Exp2: Supervised Fune-Tuning(SFT)
+## Exp2: Supervised Fine-Tuning (SFT)
 
-將預訓練模型透過SFT訓練於Imagenet-1k與AOD資料集，並對兩者進行比較
+在exp2我們加入SFT將Pipeline 1與Pipeline 2的模型微調於imagenet-1k與AOD資料集，觀察SFT對於不同預訓練流程的模型在下游任務的影響
+
+SFT的模型包含：
+- Dinov2
+- Dinov3
+- Pixio
+- MAE_pretrain_vit_large
+- Vit-large-patch16-224
+
+DAP + SFT的模型包含：
+- RETFound_dinov2_meh
+- RETFound_dinov2_shanghai
+
 
 ### Experimental Setup
 
@@ -173,13 +210,14 @@ Baseline效果比較如下表
 
 - SFT on Imagenet-1k Dataset
 
-	|Model\Dataset|APTOS2019|MESSIDOR2|Glaucoma fundus|Retina|IDRID_Data|PAPILA|
-	|---|---|---|---|---|---|---|
-	|**DINOv2**|**0.8456**|**0.7681**|0.8013|0.7138|0.5786|0.7592|
-	|**DINOv3**|0.8396|0.7452|0.8370|0.7227|0.5845|0.7918|
-	|**Pixio**|0.8347|0.7308|0.7871|0.6475|0.4796|0.7306|
-	|**RetFound (meh)**|0.8451|0.7669|0.8417|**0.7448**|**0.6019**|**0.8204**|
-	|**RetFound (shanghai)**|0.8484|0.7297|**0.8529**|0.6895|0.5942|0.7959|
+	| Model\Dataset                    | APTOS2019  | Glaucoma fundus | MESSIDOR2 | Retina     | IDRID_Data | PAPILA     |
+	| -------------------------------- | ---------- | --------------- | --------- | ---------- | ---------- | ---------- |
+	| **RETFound dinov2 (meh) w/o sft** | **0.8513** | **0.8572**          | 0.7631    | 0.7304     | 0.5942     | 0.8184     |
+	| **DINOv2**                       | 0.8456     | 0.8013          | **0.7681**    | 0.7138     | 0.5786     | 0.7592     |
+	| **DINOv3**                       | 0.8396     | 0.8370          | 0.7452    | 0.7227     | 0.5845     | 0.7918     |
+	| **Pixio**                        | 0.8347     | 0.7871          | 0.7308    | 0.6475     | 0.4796     | 0.7306     |
+	| **RetFound (meh)**               | 0.8451     | 0.8417          | 0.7669    | **0.7448** | **0.6019** | **0.8204** |
+	| **RetFound (shanghai)**          | 0.8484     | 0.8529     | 0.7297    | 0.6895     | 0.5942     | 0.7959     |
 
 ### Computational cost
 
