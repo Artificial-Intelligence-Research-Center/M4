@@ -260,6 +260,8 @@ def main(args, criterion):
     dataset_train = build_dataset(is_train="train", args=args)
     dataset_val   = build_dataset(is_train="val",   args=args)
     dataset_test  = build_dataset(is_train="test",  args=args)
+    if os.path.exists(os.path.join(args.data_path, "final_val")):
+        dataset_final_val = build_dataset(is_train="final_val", args=args)
 
     num_tasks   = misc.get_world_size()
     global_rank = misc.get_rank()
@@ -461,6 +463,16 @@ def main(args, criterion):
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
     model.to(device)
+
+    if os.path.exists(os.path.join(args.data_path, "final_val")):
+        print(f"Val test with the best model from epoch {checkpoint.get('epoch', -1)}:")
+        _val_stats, _val_auc_roc, pred_outputs = evaluate(
+            data_loader_final_val, model, device, args, -1, mode="final_val",
+            num_class=args.nb_classes, log_writer=None
+        )
+        csv_path = os.path.join(args.output_dir, args.task, f'predictions_val.csv')
+        pred_outputs.to_csv(csv_path, index=False, encoding='utf-8-sig')
+
     print(f"Test with the best model, epoch = {checkpoint.get('epoch', -1)}:")
     _test_stats, _auc_roc, pred_outputs = evaluate(
         data_loader_test, model, device, args, -1, mode="test",
@@ -468,6 +480,7 @@ def main(args, criterion):
     )
     csv_path = os.path.join(args.output_dir, args.task, f'predictions_test.csv')
     pred_outputs.to_csv(csv_path, index=False, encoding='utf-8-sig')
+
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
