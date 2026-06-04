@@ -166,12 +166,12 @@ The effects of different hyper-parameters using RETFound_dinov2_meh are compared
 | **RETFound Paper**         | **85.24 ±0.08**  | 76.84 ±1.08      | 82.84 ±0.88            | 70.50 ±3.28     | **65.63 ±2.96**  | **84.08 ±3.19** |
 | **MAE Default**            | 85.16 ±0.67      | **77.07 ±0.88**  | **86.92 ±0.63**        | 71.16 ±1.72     | 62.91 ±4.63      | 82.65 ±3.31     |
 
-### Experimental results 
+### Experimental results
 
-Baseline performance comparison is shown in the tables below:
-
+**Baseline performance comparison (1150521)**
 ![[assets/Exp1-1.png]](assets/Exp1-1.png)
 
+**Baseline performance comparison (1150521)**
 ![[assets/Exp1-2.png]](assets/Exp1-2.png)
 
 ## Summary
@@ -205,10 +205,13 @@ DAP + SFT models include:
 ### Experimental results
 
 - SFT on AOD Dataset
-	![[Exp2-1_AOD.png]](assets/Exp2-1_AOD.png)
+
+	**Supervised Fine-Tuning on AOD dataset (1150521)**
+	![[Exp2-1_AOD.png]](assets/Exp2-1_AOD.png )
 
 - SFT on Imagenet-1k Dataset
 
+	**Comparison of SFT on Imagenet-1k dataset (1150521)**
 	| Model\Dataset                    | APTOS2019  | Glaucoma fundus | MESSIDOR2 | Retina     | IDRID_Data | PAPILA     |
 	| -------------------------------- | ---------- | --------------- | --------- | ---------- | ---------- | ---------- |
 	| **RETFound dinov2 (meh) w/o sft** | **0.8513** | **0.8572**      | 0.7631    | 0.7304     | 0.5942     | 0.8184     |
