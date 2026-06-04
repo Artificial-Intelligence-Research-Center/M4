@@ -170,10 +170,10 @@ DAP的模型包含：
 
 Baseline效果比較如下表
 
-**Baseline performance comparison (1150521)**
+**Baseline performance comparison (2026/05/21)**
 ![[assets/Exp1-1.png]](assets/Exp1-1.png)
 
-**Baseline performance comparison (1150521)**
+**Baseline performance comparison (2026/05/21)**
 ![[assets/Exp1-2.png]](assets/Exp1-2.png)
 
 ## Summary
@@ -208,12 +208,12 @@ DAP + SFT的模型包含：
 
 - SFT on AOD Dataset
 
-	**Supervised Fine-Tuning on AOD dataset (1150521)**
+	**Supervised Fine-Tuning on AOD dataset (2026/05/21)**
 	![[Exp2-1_AOD.png]](assets/Exp2-1_AOD.png )
 
 - SFT on Imagenet-1k Dataset
 
-	**Comparison of SFT on Imagenet-1k dataset (1150521)**
+	**Comparison of SFT on Imagenet-1k dataset (2026/05/21)**
 	| Model\Dataset                    | APTOS2019  | Glaucoma fundus | MESSIDOR2 | Retina     | IDRID_Data | PAPILA     |
 	| -------------------------------- | ---------- | --------------- | --------- | ---------- | ---------- | ---------- |
 	| **RETFound dinov2 (meh) w/o sft** | **0.8513** | **0.8572**          | 0.7631    | 0.7304     | 0.5942     | 0.8184     |
