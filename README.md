@@ -124,16 +124,16 @@ python SFT_script.py
 
 ## Exp1: Performance of baseline models
 
-在exp1我們比較Pipeline 1與Pipeline 2的模型在6個資料集的表現
+在exp1我們比較Natural Image pre-trained model與RETFound的DAP模型在6個資料集的表現
 
-其中無Adaptation的模型包含：
+其中Natural Image pre-trained model模型包含：
 - Dinov2
 - Dinov3
 - Pixio
 - MAE_pretrain_vit_large
 - Vit-large-patch16-224
 
-進行DAP的模型包含：
+DAP的模型包含：
 - RETFound_mae_natureCFP
 - RETFound_mae_meh
 - RETFound_mae_shanghai
@@ -182,14 +182,13 @@ Baseline效果比較如下表
 
 ## Exp2: Supervised Fine-Tuning (SFT)
 
-在exp2我們加入SFT將Pipeline 1與Pipeline 2的模型微調於imagenet-1k與AOD資料集，觀察SFT對於不同預訓練流程的模型在下游任務的影響
+在exp2我們加入SFT將Natural Image pre-trained model與RETFound的DAP模型微調於imagenet-1k與AOD資料集，觀察SFT對於不同預訓練流程的模型在下游任務的影響
 
-SFT的模型包含：
+其中執行SFT的模型包含：
 - Dinov2
 - Dinov3
 - Pixio
 - MAE_pretrain_vit_large
-- Vit-large-patch16-224
 
 DAP + SFT的模型包含：
 - RETFound_dinov2_meh

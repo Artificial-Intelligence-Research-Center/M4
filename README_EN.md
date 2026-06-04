@@ -124,7 +124,7 @@ python SFT_script.py
 
 ## Exp1: Performance of baseline models
 
-In Exp1, we compare the performance of models with Pipeline 1 and Pipeline 2 across 6 datasets.
+In Exp1, we compare the performance of Natural Image pre-trained models and RETFound DAP models across 6 datasets.
 
 Models without adaptation include:
 - Dinov2
@@ -182,14 +182,13 @@ Baseline performance comparison is shown in the tables below:
 
 ## Exp2: Supervised Fine-Tuning (SFT)
 
-In Exp2, we add SFT on Pipeline 1 and Pipeline 2 models using Imagenet-1k and AOD datasets, and observe how SFT affects downstream performance under different pre-training workflows.
+In Exp2, we add SFT to fine-tune Natural Image pre-trained models and RETFound DAP models on the Imagenet-1k and AOD datasets, and observe how SFT affects downstream performance under different pre-training workflows.
 
 SFT models include:
 - Dinov2
 - Dinov3
 - Pixio
 - MAE_pretrain_vit_large
-- Vit-large-patch16-224
 
 DAP + SFT models include:
 - RETFound_dinov2_meh
