@@ -55,15 +55,23 @@ pip install -r requirements.txt
 
 ![[assets/Adaptation-pipelines.png]](assets/Adaptation-pipelines.png)
 
-除了直接利用Natural image pre-trained模型進行下游任務以外，我們也測試3種不同Adaptation方法的效果，分別為：
-1. DAP (DAP將直接使用RETFound官方提供的模型權重)
-2. SFT (SFT將額外在醫療影像或自然影像資料集上進行監督式微調)
-3. DAP + SFT (先進行DAP，再進行SFT)
+- Self-supervised Domain-adaptive Pre-training (DAP): 透過百萬級別的無標籤資料進行自監督式的領域適應預訓練，讓模型能夠學習醫療影像的特徵與結構，提升模型在醫療影像上的表現與泛化能力。
+- Supervised Fine-tuning (SFT): 透過人工標注之資料進行監督式微調，讓模型能夠更好地適應特定的下游任務，提升模型在特定任務上的表現。
+- Downstream Fine-tuning (DFT): 透過單一下游任務之標注資料進行微調，測試模型在此資料集上的表現。
 
+測試時我們針對各種不同訓練流程的效果進行比較，分別為：
+1. 直接使用自然影像預訓練的模型進行下游任務微調
+2. 對自然影像預訓練的模型進行DAP後，再進行下游任務微調，DAP模型我們將使用RETFound論文中提供的模型權重，包含RETFound_mae_natureCFP、RETFound_mae_meh、RETFound_mae_shanghai、RETFound_dinov2_meh、RETFound_dinov2_shanghai，RETFound官方利用百萬級別醫療影像資料集結合SSL訓練方法進行DAP訓練，並開源訓練完成的模型權重，供研究者使用與評估，我們將使用這些模型權重來測試DAP的效果
+3. 對自然影像預訓練的模型進行SFT後，再進行下游任務微調
+4. 對自然影像預訓練的模型進行DAP後，再進行SFT，最後進行下游任務微調
 
-## Dataset
+## Fundus Datasets
 
-### Fundus Datasets
+模型現階段透過眼底影像資料集進行測試，未來將會持續增加其他醫療影像的測試，讓模型能夠在更多樣化的醫療影像上進行評估與優化。
+
+### Downstream fine-tuning Datasets
+
+我們選擇6個公開的眼底影像資料集作為下游任務的測試資料集，這些資料集涵蓋了不同的眼科疾病，並且具有不同的資料量與來源，能夠幫助我們全面評估模型在醫療影像領域的適應能力與表現
 
 | 資料集名稱 (Dataset)   | 資料量 (Size) | 資源連結 (Source)                                                                                             |
 | :---------------- | :--------- | :-------------------------------------------------------------------------------------------------------- |
@@ -78,7 +86,9 @@ pip install -r requirements.txt
 
 dataset請於下載後依照提供的5-fold列表切分後放入`data`資料夾中，例如: ATPOS2019資料集的fold1請放入`data/5_fold_APTOS2019/APTOS2019_seed42_fold0`
 
-### Supervised Fine-Tuning Datasets
+### Supervised Fine-Tuning Datasets (Fundus & Natural Image)
+
+在SFT實驗中，我們使用Augmented Ocular Disease (AOD)資料集作為醫療影像的SFT資料集，並使用Imagenet-1k資料集作為自然影像的SFT資料集，我們將於Experiments中比較兩者的效果。
 
 | 資料集名稱 (Dataset) | 資料量 (Size) | 資源連結 (Source) |
 | :-------------- | :--------- | :---------------------------------------------------------------------------------- |
@@ -191,6 +201,7 @@ Baseline效果比較如下表
 - Dinov3
 - Pixio
 - MAE_pretrain_vit_large
+- Vit-large-patch16-224
 
 DAP + SFT的模型包含：
 - RETFound_dinov2_meh
@@ -208,18 +219,20 @@ DAP + SFT的模型包含：
 
 - SFT on AOD Dataset
 
-	**Supervised Fine-Tuning on AOD dataset (2026/05/21)**
+	**Supervised Fine-Tuning on AOD dataset (2026/06/15)**
 	![[Exp2-1_AOD.png]](assets/Exp2-1_AOD.png )
 
 - SFT on Imagenet-1k Dataset
 
-	**Comparison of SFT on Imagenet-1k dataset (2026/05/21)**
+	**Comparison of SFT on Imagenet-1k dataset (2026/06/15)**
 	| Model\Dataset                    | APTOS2019  | Glaucoma fundus | MESSIDOR2 | Retina     | IDRID_Data | PAPILA     |
 	| -------------------------------- | ---------- | --------------- | --------- | ---------- | ---------- | ---------- |
 	| **RETFound dinov2 (meh) w/o sft** | **0.8513** | **0.8572**          | 0.7631    | 0.7304     | 0.5942     | 0.8184     |
 	| **DINOv2**                       | 0.8456     | 0.8013          | **0.7681**    | 0.7138     | 0.5786     | 0.7592     |
 	| **DINOv3**                       | 0.8396     | 0.8370          | 0.7452    | 0.7227     | 0.5845     | 0.7918     |
-	| **Pixio**                        | 0.8347     | 0.7871          | 0.7308    | 0.6475     | 0.4796     | 0.7306     |
+	| **Pixio**                        | 0.8304     | 0.7686          | 0.7179    | 0.6188     | 0.4854     | 0.7367     |
+	| **MAE_pretrain_vit_large**       | 0.8284     | 0.7819          | 0.7080    | 0.6376     | 0.4796     | 0.7306     |
+	| **vit-large-patch16-224**        | 0.8298     | 0.8215          | 0.7118    | 0.6829     | 0.4951     | 0.7612     |
 	| **RetFound (meh)**               | 0.8451     | 0.8417          | 0.7669    | **0.7448** | **0.6019** | **0.8204** |
 	| **RetFound (shanghai)**          | 0.8484     | 0.8529     | 0.7297    | 0.6895     | 0.5942     | 0.7959     |
 

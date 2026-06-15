@@ -55,15 +55,23 @@ The following 10 models are used as baselines. Except for the RETFound model, pl
 
 ![[assets/Adaptation-pipelines.png]](assets/Adaptation-pipelines.png)
 
-In addition to directly applying natural image pre-trained models to downstream tasks, we also evaluate three adaptation strategies:
-1. DAP (DAP directly uses model weights released by the official RETFound repository)
-2. SFT (SFT additionally performs supervised fine-tuning on medical image or natural image datasets)
-3. DAP + SFT (apply DAP first, then SFT)
+- Self-supervised Domain-adaptive Pre-training (DAP): Performs self-supervised domain-adaptive pre-training on million-scale unlabeled data, enabling the model to learn the features and structures of medical images and improving its performance and generalization on medical imaging tasks.
+- Supervised Fine-tuning (SFT): Performs supervised fine-tuning on manually annotated data, allowing the model to better adapt to specific downstream tasks and improve task-specific performance.
+- Downstream Fine-tuning (DFT): Fine-tunes the model on labeled data from a single downstream task to evaluate its performance on that dataset.
 
+In our experiments, we compare the effects of different training pipelines:
+1. Directly fine-tune natural image pre-trained models on downstream tasks.
+2. Apply DAP to natural image pre-trained models, then fine-tune them on downstream tasks. For DAP models, we use the weights released in the RETFound paper, including RETFound_mae_natureCFP, RETFound_mae_meh, RETFound_mae_shanghai, RETFound_dinov2_meh, and RETFound_dinov2_shanghai. The official RETFound team used million-scale medical image datasets together with SSL training methods for DAP training, and released the trained model weights for researchers to use and evaluate. We use these weights to test the effect of DAP.
+3. Apply SFT to natural image pre-trained models, then fine-tune them on downstream tasks.
+4. Apply DAP to natural image pre-trained models, then apply SFT, and finally fine-tune them on downstream tasks.
 
-## Dataset
+## Fundus Datasets
 
-### Fundus Datasets
+At the current stage, models are evaluated using fundus image datasets. More medical imaging datasets will be added in the future so that the models can be evaluated and optimized across more diverse medical imaging scenarios.
+
+### Downstream fine-tuning Datasets
+
+We select six public fundus image datasets as downstream task evaluation datasets. These datasets cover different ophthalmic diseases and vary in size and source, helping us comprehensively evaluate model adaptability and performance in medical imaging.
 
 | Dataset Name       | Size         | Source                                                                                             |
 | :----------------- | :----------- | :------------------------------------------------------------------------------------------------ |
@@ -78,7 +86,9 @@ In addition to directly applying natural image pre-trained models to downstream 
 
 After downloading the dataset, split it according to the provided 5-fold list and place it in the `data` folder. For example, place fold1 of the ATPOS2019 dataset in `data/5_fold_APTOS2019/APTOS2019_seed42_fold0`.
 
-### Supervised Fine-Tuning Datasets
+### Supervised Fine-Tuning Datasets (Fundus & Natural Image)
+
+In the SFT experiments, we use the Augmented Ocular Disease (AOD) dataset as the medical image SFT dataset and the Imagenet-1k dataset as the natural image SFT dataset. Their effects are compared in the Experiments section.
 
 | Dataset Name       | Size         | Source                                                                                             |
 | :----------------- | :----------- | :------------------------------------------------------------------------------------------------ |
@@ -189,6 +199,7 @@ SFT models include:
 - Dinov3
 - Pixio
 - MAE_pretrain_vit_large
+- Vit-large-patch16-224
 
 DAP + SFT models include:
 - RETFound_dinov2_meh
@@ -206,20 +217,22 @@ DAP + SFT models include:
 
 - SFT on AOD Dataset
 
-	**Supervised Fine-Tuning on AOD dataset (2026/05/21)**
-	![[Exp2-1_AOD.png]](assets/Exp2-1_AOD.png)
+	**Supervised Fine-Tuning on AOD dataset (2026/06/15)**
+	![[Exp2-1_AOD.png]](assets/Exp2-1_AOD.png )
 
 - SFT on Imagenet-1k Dataset
 
-	**Comparison of SFT on Imagenet-1k dataset (2026/05/21)**
+	**Comparison of SFT on Imagenet-1k dataset (2026/06/15)**
 	| Model\Dataset                    | APTOS2019  | Glaucoma fundus | MESSIDOR2 | Retina     | IDRID_Data | PAPILA     |
 	| -------------------------------- | ---------- | --------------- | --------- | ---------- | ---------- | ---------- |
-	| **RETFound dinov2 (meh) w/o sft** | **0.8513** | **0.8572**      | 0.7631    | 0.7304     | 0.5942     | 0.8184     |
-	| **DINOv2**                       | 0.8456     | 0.8013          | **0.7681**| 0.7138     | 0.5786     | 0.7592     |
+	| **RETFound dinov2 (meh) w/o sft** | **0.8513** | **0.8572**          | 0.7631    | 0.7304     | 0.5942     | 0.8184     |
+	| **DINOv2**                       | 0.8456     | 0.8013          | **0.7681**    | 0.7138     | 0.5786     | 0.7592     |
 	| **DINOv3**                       | 0.8396     | 0.8370          | 0.7452    | 0.7227     | 0.5845     | 0.7918     |
-	| **Pixio**                        | 0.8347     | 0.7871          | 0.7308    | 0.6475     | 0.4796     | 0.7306     |
+	| **Pixio**                        | 0.8304     | 0.7686          | 0.7179    | 0.6188     | 0.4854     | 0.7367     |
+	| **MAE_pretrain_vit_large**       | 0.8284     | 0.7819          | 0.7080    | 0.6376     | 0.4796     | 0.7306     |
+	| **vit-large-patch16-224**        | 0.8298     | 0.8215          | 0.7118    | 0.6829     | 0.4951     | 0.7612     |
 	| **RetFound (meh)**               | 0.8451     | 0.8417          | 0.7669    | **0.7448** | **0.6019** | **0.8204** |
-	| **RetFound (shanghai)**          | 0.8484     | 0.8529          | 0.7297    | 0.6895     | 0.5942     | 0.7959     |
+	| **RetFound (shanghai)**          | 0.8484     | 0.8529     | 0.7297    | 0.6895     | 0.5942     | 0.7959     |
 
 ### Computational cost
 
