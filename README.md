@@ -249,7 +249,7 @@ DAP + SFT的模型包含：
 ## Summary
 
 - 整體來說，不論是透過AOD或imagenet-1k資料集進行SFT訓練，dinov2與RetFound(meh)表現皆比其他模型好
-- 透過AOD進行SFT在各個資料集的最高分都比imagenet-1k更高，並且**透過imagenet-1k訓練的模型沒有超越SOTA的表現**
+- 透過AOD進行SFT在各個資料集的最高分都比imagenet-1k更高
 - 雖然dinov3在未進行SFT時效果比其他自然影像模型更好，但在SFT後除Glaucoma_fundus資料集外，在其他資料集Dinov3明顯比Dinov2更差
 - 比較原始RETFound_dinov2_meh(epoch 0的點)與dinov2模型，即使使用開銷顯著更低的SFT方法，在6個資料集的效果除了Glaucoma fundus與PAPILA以外皆能取得更好的表現，顯示出SFT方法在開銷較低的情況下，也能取得與continual pretraining接近的效果
 
