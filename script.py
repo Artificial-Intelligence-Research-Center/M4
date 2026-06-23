@@ -6,12 +6,13 @@ import GPUtil
 
 # ==== 配置設定 ====
 TEST_FOLDERS = [
+    # "gas_loss_exp",
     "baseline_models",
     # "gastro_dinov3"
     # "our_dinov3"
-    # "gastroscopy_baseline",
+    "gastroscopy_baseline",
     # "our_pixio_dis"
-    # "dinov2_base",
+    "dinov2_base",
     # "dinov3_cs"
     # "dinov3_0414"
     # "sft_default_param",
@@ -24,19 +25,22 @@ TEST_FOLDERS = [
     # "retfound_sft_eval_models"
     # "dinov3_0429",
     # "only_vit",
-    # "sft_fundus_mae_param"
-    # "sft_imagenet2fundus_models/eval_models"
+    # "sft_fundus_mae_param",
+    # "sft_imagenet2fundus_models/eval_models",
+    # "experiment_redo"
+    # "redo_SFT_finetune_0601"
+    # "dinov2_vitb14_gastronet_0609"
 ]
 
 TEST_DATASETS = [
-    "APTOS2019",
-    "MESSIDOR2",
-    "IDRiD_data",
-    "Glaucoma_fundus",
-    "PAPILA",
-    "Retina",
+    # "APTOS2019",
+    # "MESSIDOR2",
+    # "IDRiD_data",
+    # "Glaucoma_fundus",
+    # "PAPILA",
+    # "Retina",
     # "MIL",
-    # "SL",
+    "SL",
     # "HK",
 ]
 
@@ -118,7 +122,12 @@ def get_model_info(model_path):
         raise ValueError(f"無法解析模型資訊: {model_path}")
 
 if __name__ == "__main__":
-    output_dir = "test"
+    # output_dir = "experiment_redo"
+    # output_dir = "gas_loss_exp"
+    # output_dir = "test"
+    # output_dir = "redo_SFT_finetune_0601"
+    # output_dir = "dinov2_vitb14_gastronet_0609"
+    output_dir = "gastroscopy_baseline_finetune_0612"
 
     # 0. 先收集所有模型檔案
     test_models = []
@@ -132,7 +141,7 @@ if __name__ == "__main__":
     #     ]
     # )
     for path in TEST_FOLDERS:
-        model_ckpts = [f for f in os.listdir(path) if f.endswith(".pth")]
+        model_ckpts = [f for f in os.listdir(path) if f.endswith((".pth", ".pt"))]
         test_models.extend([os.path.join(path, ckpt) for ckpt in model_ckpts])
 
     tasks = []
@@ -160,7 +169,7 @@ if __name__ == "__main__":
                     print(f"加入任務: {task_id}")
                     tasks.append((cmd, task_id))
 
-                # paper
+                # papers
                 # cmd = (
                 #     f"python main_finetune.py "
                 #     f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
@@ -168,7 +177,9 @@ if __name__ == "__main__":
                 #     f"--nb_classes {num_class} --data_path {data_path} "
                 #     f"--output_dir {output_dir}/paper_param --input_size 224 --task {task_id} --adaptation finetune"
                 # )
-                # tasks.append((cmd, task_id))
+                # if not os.path.exists(f"{output_dir}/paper_param/{task_id}"):
+                #     print(f"加入任務: {task_id}")
+                #     tasks.append((cmd, task_id))
 
                 # MAE
                 cmd = (

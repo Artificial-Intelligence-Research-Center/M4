@@ -277,8 +277,14 @@ def main(args, criterion):
             sampler_val = torch.utils.data.DistributedSampler(
                 dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
+            if os.path.exists(os.path.join(args.data_path, "final_val")):
+                sampler_final_val = torch.utils.data.DistributedSampler(
+                    dataset_final_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                )
         else:
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+            if os.path.exists(os.path.join(args.data_path, "final_val")):
+                sampler_final_val = torch.utils.data.SequentialSampler(dataset_final_val)
 
     if args.dist_eval:
         if len(dataset_test) % num_tasks != 0:
@@ -310,6 +316,13 @@ def main(args, criterion):
             batch_size=args.batch_size, num_workers=args.num_workers,
             pin_memory=args.pin_mem, drop_last=False,
         )
+
+        if os.path.exists(os.path.join(args.data_path, "final_val")):
+            data_loader_final_val = torch.utils.data.DataLoader(
+                dataset_final_val, sampler=sampler_final_val,
+                batch_size=args.batch_size, num_workers=args.num_workers,
+                pin_memory=args.pin_mem, drop_last=False,
+            )
 
     data_loader_test = torch.utils.data.DataLoader(
         dataset_test, sampler=sampler_test,
@@ -467,7 +480,7 @@ def main(args, criterion):
     if os.path.exists(os.path.join(args.data_path, "final_val")):
         print(f"Val test with the best model from epoch {checkpoint.get('epoch', -1)}:")
         _val_stats, _val_auc_roc, pred_outputs = evaluate(
-            data_loader_final_val, model, device, args, -1, mode="final_val",
+            data_loader_final_val, model, device, args, -1, mode="val",
             num_class=args.nb_classes, log_writer=None
         )
         csv_path = os.path.join(args.output_dir, args.task, f'predictions_val.csv')
