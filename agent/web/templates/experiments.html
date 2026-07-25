@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}新實驗 — M4{% endblock %}
+{% block content %}
+  <div id="gpu-chk" class="banner" style="background:#f4f6f9;color:#555">
+    <span class="spin" style="width:12px;height:12px;border-width:2px;vertical-align:-2px"></span>
+    GPU 狀態檢查中…</div>
+  <div id="gpu-ok" class="banner ok" style="display:none">GPU 可配置 CUDA — 可實際訓練。</div>
+  <div id="gpu-warn" class="banner warn" style="display:none">GPU 目前無法配置 CUDA（可能被外部佔用 / Exclusive_Process）。仍可用「分析 (dry-run)」；「開始訓練」會排入背景。</div>
+  <script>
+  (async function(){   // 非同步查 GPU (原本在渲染前同步查, 會卡住頁面最多 15 秒)
+    let ok=null;
+    try{ ok=(await (await fetch('gpu/')).json()).allocatable; }catch(_){}
+    document.getElementById('gpu-chk').style.display='none';
+    const el=document.getElementById(ok?'gpu-ok':'gpu-warn');
+    if(el) el.style.display='';
+  })();
+  </script>
+
+  <div class="card">
+    <h2>單一實驗（分析 / 單一 trial）</h2>
+    <form id="form">
+      <label>資料集路徑 (ImageFolder: train/val/test/&lt;class&gt;/*)</label>
+      <input type="text" name="data_path" value="{{ default_data }}">
+      <div class="row">
+        <div>
+          <label>Encoder</label>
+          <select name="encoder">
+            <option value="">(自動: Advisor 選第一個可用)</option>
+            {% for e in encoders %}
+              <option value="{{ e.model_key }}" {% if e.model_key not in available_keys %}disabled{% endif %}>
+                {{ e.model_key }} — {{ e.domain }}{% if e.model_key not in available_keys %}(權重未取得){% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>超參起點 (preset)</label>
+          <select name="preset">{% for p in presets %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select>
+        </div>
+        <div><label>主要指標 (primary_metric)</label><input type="text" name="primary_metric" value="score"></div>
+      </div>
+      <button type="button" class="ghost" onclick="analyze()">分析 (dry-run)</button>
+      <button type="submit" class="primary" formaction="run/" formmethod="post">開始訓練</button>
+    </form>
+  </div>
+
+  <div class="card" id="result" style="display:none">
+    <h2>分析結果 (dry-run)</h2>
+    <div id="result-body"></div>
+  </div>
+
+  <div class="card">
+    <h2>單一 trial 訓練進度（即時）</h2>
+    <div class="row" style="align-items:flex-end">
+      <div>
+        <label>選擇 run</label>
+        <select id="prog-run" onchange="pollProgress()">
+          {% for n in run_names %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
+        </select>
+      </div>
+      <div style="flex:0 0 auto">
+        <button type="button" class="ghost" onclick="pollProgress()">刷新</button>
+        <label style="display:inline; margin-left:8px; font-size:13px">
+          <input type="checkbox" id="prog-auto" checked style="width:auto"> 自動 (3s)</label>
+      </div>
+    </div>
+    {% if not run_names %}<div class="muted" style="margin-top:10px">尚無 run。</div>{% endif %}
+    <div id="prog-body" style="margin-top:12px">{% if run_names %}<div class="muted">載入中…</div>{% endif %}</div>
+  </div>
+{% endblock %}
+
+{% block script %}
+<script>
+async function analyze() {
+  const fd = new FormData(document.getElementById('form'));
+  const box = document.getElementById('result'), body = document.getElementById('result-body');
+  box.style.display = 'block'; body.innerHTML = '分析中…';
+  const j = await (await fetch('analyze/', { method: 'POST', body: fd })).json();
+  if (!j.ok) { body.innerHTML = '<pre>' + (j.error || '錯誤') + '</pre>'; return; }
+  const p = j.profile;
+  let html = '<table class="kv">';
+  html += `<tr><td>類別數</td><td>${p.num_classes} — ${p.class_names.join(', ')}</td></tr>`;
+  html += `<tr><td>樣本 (train/val/test)</td><td>${p.n_train} / ${p.n_val} / ${p.n_test}</td></tr>`;
+  html += `<tr><td>不平衡比</td><td>${p.imbalance_ratio}</td></tr>`;
+  html += `<tr><td>領域線索</td><td>${p.modality_hint || '—'}</td></tr></table>`;
+  html += `<label>組出的 Recipe (encoder: <b>${j.recipe.encoder.model_key}</b>, ${j.recipe.encoder.adaptation})</label>`;
+  html += '<pre>' + JSON.stringify(j.recipe, null, 2) + '</pre>';
+  html += '<label>訓練指令</label><pre>' + j.command + '</pre>';
+  if (j.unsupported && j.unsupported.length)
+    html += '<div class="banner warn">尚未接上的元件: ' + j.unsupported.join('; ') + '</div>';
+  body.innerHTML = html;
+}
+async function pollProgress() {
+  const sel = document.getElementById('prog-run'), body = document.getElementById('prog-body');
+  if (!sel || !sel.value) return;
+  let j; try { j = await (await fetch('progress/?run=' + encodeURIComponent(sel.value))).json(); }
+  catch (e) { body.innerHTML = '<div class="banner warn">連線失敗</div>'; return; }
+  if (!j.ok) { body.innerHTML = '<div class="banner warn">' + (j.error || '錯誤') + '</div>'; return; }
+  if (j.status === 'no-log') { body.innerHTML = '<div class="muted">' + (j.note || '尚無 log') + '</div>'; return; }
+  const pill = `<span class="pill ${j.status}">${j.status}</span>`;
+  const ep = (j.cur_epoch === null ? '?' : j.cur_epoch + 1) + ' / ' + (j.total_epochs || '?');
+  let html = `<div style="display:flex;justify-content:space-between;margin-bottom:6px">`
+    + `<span>${pill} <b>epoch ${ep}</b> <span class="muted">(${j.log_file || ''})</span></span>`
+    + `<span class="muted">${j.percent}%${j.train_time ? ' · ' + j.train_time : ''}</span></div>`;
+  html += `<div class="bar"><span style="width:${j.percent}%"></span></div>`;
+  const s = [];
+  if (j.best_score !== null) s.push(`best score <b>${fmt(j.best_score)}</b> @ epoch ${j.best_epoch}`);
+  if (j.train_loss !== null) s.push(`train loss ${fmt(j.train_loss)}`);
+  if (j.val_loss !== null) s.push(`val loss ${fmt(j.val_loss)}`);
+  html += `<div class="muted" style="margin-top:8px">${s.join(' · ') || '尚未有指標'}</div>`;
+  if (j.val) {
+    html += '<label>最新 val 指標</label><div class="metrics">';
+    for (const k in METRIC_LABELS) if (j.val[k] !== undefined)
+      html += `<div class="m"><b>${fmt(j.val[k])}</b><span>${METRIC_LABELS[k]}</span></div>`;
+    html += '</div>';
+  }
+  html += '<label>Log 尾端</label><pre style="max-height:220px">' + (j.tail || '') + '</pre>';
+  body.innerHTML = html;
+}
+if (document.getElementById('prog-run') && document.getElementById('prog-run').value){
+  pollProgress();
+  setInterval(()=>{ const a=document.getElementById('prog-auto'); if(a&&a.checked) pollProgress(); }, 3000);
+}
+</script>
+{% endblock %}

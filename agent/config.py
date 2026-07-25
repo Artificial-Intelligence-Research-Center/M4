@@ -1,0 +1,115 @@
+"""AgentConfig — 設定檔契約與載入 (設計文件 §7).
+
+對應 YAML:
+
+    data_path: ./data/5_fold_PAPILA/PAPILA_seed42_fold0
+    task: { type: classification }
+    task_template: fundus_classification
+    eval:
+      primary_metric: auroc
+      report_metrics: [accuracy, f1, auroc, kappa]
+      aggregation: mean_std
+    loop:
+      encoders_per_run: 3
+      trials_per_encoder: 4
+      max_trials: 12
+      patience: 2
+      num_drafts: 2
+      debug_prob: 0.5
+      max_debug_depth: 2
+    advisor: { type: llm, model: claude-opus-4-8, allow_code_edit: false }
+    budget: { max_wall_clock_min: null }
+
+CLI: python -m agent.auto_finetune --config config.yaml
+"""
+from __future__ import annotations
+
+import os
+from typing import Literal, Optional
+
+import yaml
+from pydantic import BaseModel, Field
+
+from .schemas import EvalConfig
+
+
+class LoopConfig(BaseModel):
+    """迴圈與停止條件 (設計文件 §5.7 StopPolicy 聯集)。
+
+    StopPolicy = max_trials 硬上限 ∪ 時間預算 ∪ 使用者/Advisor 停止 ∪
+    「已完成 ≥ min_trials 且連續 patience 輪『改良嘗試』(improve/resume) 無提升」。
+    draft/debug 是探索/修復, 不計入 patience (但有提升照樣歸零)。"""
+    encoders_per_run: int = 3      # (已停用) draft 輪替的 encoder 上限改由 num_drafts 決定
+    trials_per_encoder: int = 1    # (已停用) 舊的每 encoder 輪數; 改由全域樹搜尋控制
+    max_trials: int = 12           # 全域 trial 總數上限 (= 樹搜尋總輪數)
+    patience: int = 4              # 連續 patience 輪 improve/resume 無提升才停
+    min_trials: int = 6            # 至少完成這麼多輪才允許 patience 停止 (保護探索期)
+    min_delta: float = 0.0         # 視為「有提升」的最小 primary 增幅
+    # 全域樹搜尋 (參考 aideml agent.search.*): 先開滿 draft → 機率性 debug →
+    # 依指標機率抽節點 improve (單一解答樹, draft 跨 encoder)
+    num_drafts: int = 3            # 起手 draft 數 (輪流各 encoder; 同 encoder 換 preset)
+    debug_prob: float = 0.5        # 每輪以此機率優先除錯 buggy leaf
+    max_debug_depth: int = 2       # 連續除錯鏈上限 (超過就放棄該分支)
+    improve_temperature: float = 0.03  # 依指標抽樣的 softmax 溫度; <=0 = greedy 只選最佳
+    # 繼續訓練策略: 選中節點的 curve 未收斂時, 從其 checkpoint 續訓再多跑幾個 epoch
+    resume_unconverged: bool = True  # 開/關此策略
+    resume_epochs: int = 20          # 每次續訓多跑的 epoch 數
+    max_resumes: int = 2             # 同一分支連續續訓上限 (仍未收斂就放棄續訓)
+    resume_prob: float = 0.5         # 符合續訓條件時以此機率選 resume (其餘落到 improve)
+    max_failed_resumes: int = 2      # 全 run 連續這麼多次 resume 無提升 → 本 run 停用 resume
+
+
+class AdvisorConfig(BaseModel):
+    type: Literal["heuristic", "llm", "skill"] = "llm"   # 預設用 LLM 決策 (無 SDK/金鑰時各方法自動退回 heuristic)
+    model: str = "claude-opus-4-8"
+    preset: str = "default"        # HeuristicAdvisor 冷啟動超參起點
+    guidance: str = ""             # 使用者引導方向 (LLMAdvisor 會納入決策 prompt)
+    # 允許 LLM 修改訓練程式 (debug 階段): 修改版放 run 目錄下 (code_workspace),
+    # 原始程式不動。生成工作時可勾選。
+    allow_code_edit: bool = False
+
+
+class BudgetConfig(BaseModel):
+    max_wall_clock_min: Optional[float] = None
+    max_llm_tokens: Optional[int] = None
+
+
+class GpuOptConfig(BaseModel):
+    """GPU 利用率最佳化: 每個 trial 背景取樣 nvidia-smi, 利用率太低時對後續
+    衍生的 recipe 採取措施 (記憶體有餘裕→加大 batch; 否則→增加 dataloader worker)。"""
+    optimize: bool = True          # 開/關 (取樣照做, 只影響是否自動調整)
+    util_target: float = 60.0      # 平均利用率低於此 (%) 視為太低
+    sample_interval_s: float = 5.0  # 取樣間隔 (秒)
+    mem_target: float = 0.85       # 加大 batch 後預估記憶體峰值不可超過總量的此比例
+    max_batch_size: int = 256      # batch 上限
+    max_num_workers: int = 16      # dataloader worker 上限
+    # 預縮圖磁碟快取 (高解析度資料集的 decode 瓶頸): run 起手依 image_size_stats 決定
+    cache_auto: bool = True        # 原圖中位短邊 ≥ 1.5×cache_short_side 時自動啟用
+    cache_short_side: int = 512    # 快取短邊 (~2×input_size, 留 RandomResizedCrop 餘裕)
+
+
+class AgentConfig(BaseModel):
+    data_path: str
+    task: dict = Field(default_factory=lambda: {"type": "classification"})
+    task_template: str = "fundus_classification"
+    experiment_name: Optional[str] = None
+    eval: EvalConfig = Field(default_factory=EvalConfig)
+    loop: LoopConfig = Field(default_factory=LoopConfig)
+    advisor: AdvisorConfig = Field(default_factory=AdvisorConfig)
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    gpu: GpuOptConfig = Field(default_factory=GpuOptConfig)
+    device: int = 0
+    dry_run: bool = False
+    stream_logs: bool = True   # True: 子程序輸出即時顯示於 console + 寫檔; False: 只寫檔
+
+    @classmethod
+    def load(cls, path: str) -> "AgentConfig":
+        with open(path, encoding="utf8") as f:
+            raw = yaml.safe_load(f) or {}
+        return cls.model_validate(raw)
+
+    def dump_yaml(self, path: str) -> None:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf8") as f:
+            yaml.safe_dump(self.model_dump(mode="json"), f,
+                           allow_unicode=True, sort_keys=False)

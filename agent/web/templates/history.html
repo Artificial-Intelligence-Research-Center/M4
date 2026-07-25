@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}歷史 runs — M4{% endblock %}
+{% block content %}
+  <div class="card">
+    <h2>歷史 runs (ledger)</h2>
+    {% if runs %}
+      {% for r in runs %}
+        <div style="margin-bottom:14px">
+          <b>{{ r.name }}</b> <span class="muted">({{ r.n_trials }} trials)</span>
+          <a href="./?run={{ r.name }}" class="muted" style="margin-left:8px">→ 到工作台檢視</a>
+          {% if r.trials %}
+          <table style="margin-top:6px"><thead><tr><th>trial</th><th>狀態</th><th>primary</th><th>metrics</th></tr></thead><tbody>
+            {% for t in r.trials %}
+            <tr><td>{{ t.trial_id }}</td>
+              <td><span class="pill {{ t.status }}">{{ t.status }}</span></td>
+              <td>{{ '%.4f'|format(t.primary_score) }}</td>
+              <td class="muted">{{ t.metrics }}</td></tr>
+            {% endfor %}
+          </tbody></table>
+          {% endif %}
+        </div>
+      {% endfor %}
+    {% else %}<div class="muted">尚無歷史 run。</div>{% endif %}
+  </div>
+{% endblock %}

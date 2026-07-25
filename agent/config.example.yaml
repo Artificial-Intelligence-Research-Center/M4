@@ -1,0 +1,56 @@
+# M4 自動微調 Agent 設定範例 (設計文件 §7)
+# 用法: python -m agent.auto_finetune --config agent/config.example.yaml
+data_path: ./data/5_fold_PAPILA/PAPILA_seed42_fold0
+task:
+  type: classification
+task_template: fundus_classification      # 下游任務起點 (§5.8)
+experiment_name: null                     # null -> run_YYYYmmdd_HHMMSS
+
+eval:
+  primary_metric: score                   # 迴圈最佳化目標 (score = (f1+roc_auc+kappa)/3)
+  report_metrics: [accuracy, f1, roc_auc, kappa]
+  aggregation: single                     # single | mean_std (多 fold, P5)
+
+loop:
+  max_trials: 12                           # 全域 trial 總數上限 (= 樹搜尋總輪數)
+  # StopPolicy: 完成 ≥ min_trials 且連續 patience 輪 improve/resume 無提升才停
+  # (draft/debug 是探索/修復, 不計入 patience; 另有 max_trials/時間預算/使用者中斷)
+  min_trials: 6                            # 至少完成這麼多輪才允許 patience 提早停
+  patience: 4                              # 連續無提升的「改良嘗試」輪數
+  min_delta: 0.0                           # 視為「有提升」的最小 primary 增幅
+  # 全域 AIDE 式樹搜尋 (參考 wecoai/aideml): 單一解答樹, draft 跨 encoder
+  num_drafts: 3                            # 起手 draft 數 (輪流各 encoder; 同 encoder 換 preset)
+  debug_prob: 0.5                          # 每輪以此機率優先除錯失敗的 leaf
+  max_debug_depth: 2                       # 連續除錯鏈上限 (超過就放棄該分支)
+  improve_temperature: 0.03                # 依指標抽樣選改善起點的 softmax 溫度; <=0 = greedy
+  # 繼續訓練策略: 選中節點 curve 未收斂 → 從其 checkpoint 續訓 (--resume + --more_epochs)
+  resume_unconverged: true                 # 開/關此策略
+  resume_epochs: 20                        # 每次續訓多跑的 epoch 數
+  max_resumes: 2                           # 同一分支連續續訓上限
+  resume_prob: 0.5                         # 符合條件時以此機率選 resume (其餘給 improve)
+  max_failed_resumes: 2                    # 全 run 連續無提升的 resume 達此數 → 停用 resume
+
+advisor:
+  type: llm                                # llm (預設) | heuristic | skill; 無 SDK/金鑰時自動退回 heuristic
+  model: claude-opus-4-8                   # type=llm 時使用
+  preset: default                          # default | paper | mae 冷啟動超參起點
+  guidance: ""                             # 引導方向 (LLM 決策 prompt); web 上也可即時討論
+  allow_code_edit: false                   # 允許 LLM 修改訓練程式 (debug 階段);
+                                           # 修改版隔離在 <run_dir>/src/ 執行, 原始程式不動
+
+budget:
+  max_wall_clock_min: null                 # 時間預算護欄 (分鐘)
+  max_llm_tokens: null
+
+gpu:                                       # GPU 利用率最佳化 (訓練期間 nvidia-smi 取樣)
+  optimize: true                           # 利用率太低時自動調整後續 recipe
+  util_target: 60.0                        # 平均利用率低於此 (%) 視為太低
+  sample_interval_s: 5.0                   # 取樣間隔 (秒)
+  mem_target: 0.85                         # 加大 batch 後記憶體峰值上限 (佔總量比例)
+  max_batch_size: 256                      # batch 上限
+  max_num_workers: 16                      # dataloader worker 上限 (自動 clamp 到每 epoch iters)
+  cache_auto: true                         # 高解析度資料集自動啟用預縮圖快取 (run 起手決定)
+  cache_short_side: 512                    # 快取短邊 (原圖中位短邊 ≥ 1.5×此值才啟用)
+
+device: 0
+dry_run: false

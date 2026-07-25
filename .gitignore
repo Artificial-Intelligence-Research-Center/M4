@@ -3,6 +3,7 @@ model/
 output_dir/
 output_logs/
 data/
+logs/
 # Checkpoints
 *.pth
 *.pt
@@ -10,5 +11,12 @@ data/
 *.log
 # Tensorboard logs
 runs/
-
+*/__pycache__/
 __pycache__/
+util/__pycache__/
+util/__pycache__/__init__.cpython-311.pyc
+agent/presets.json
+.env
+.claude/settings.local.json
+fundus_baseline_finetune/
+util/__pycache__/__init__.cpython-311.pyc

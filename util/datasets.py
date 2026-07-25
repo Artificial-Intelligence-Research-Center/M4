@@ -1,5 +1,7 @@
+import hashlib
 import os
 import torch
+from PIL import Image
 from torch.utils.data import Subset
 from torchvision import datasets, transforms
 from timm.data import create_transform
@@ -13,11 +15,55 @@ class ImageFolderWithPath(datasets.ImageFolder):
         return image, label, path
 
 
+def _resized_cache_loader(cache_dir, short_side):
+    """回傳 ImageFolder loader: 從「短邊縮到 short_side 的磁碟快取」讀圖。
+
+    高解析度資料集 (如 2576x1934 眼底照) 每次 __getitem__ 都 decode 整張大圖是
+    GPU 利用率低的主因之一; 預縮快取把 decode 成本降 ~20 倍。快取 lazily 建立,
+    多 worker 併發安全 (tmp 檔 + os.replace 原子替換); 快取毀損時 fallback 原圖。
+    key 用 realpath 的 sha1 → symlink 指向同一實體檔的多個 fold 共用快取。
+    """
+    def loader(path):
+        real = os.path.realpath(path)
+        key = hashlib.sha1(real.encode("utf-8")).hexdigest()
+        sub = os.path.join(cache_dir, key[:2])
+        cpath = os.path.join(sub, f"{key}_s{short_side}.jpg")
+        if os.path.isfile(cpath):
+            try:
+                with open(cpath, "rb") as f:
+                    return Image.open(f).convert("RGB")
+            except Exception:
+                pass  # 快取毀損 → 重建
+        with open(real, "rb") as f:
+            img = Image.open(f).convert("RGB")
+        w, h = img.size
+        if min(w, h) > short_side:
+            scale = short_side / min(w, h)
+            img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                             Image.BICUBIC)
+            try:
+                os.makedirs(sub, exist_ok=True)
+                tmp = cpath + f".tmp{os.getpid()}"
+                img.save(tmp, format="JPEG", quality=95)
+                os.replace(tmp, cpath)
+            except Exception:
+                pass  # 快取寫入失敗不影響訓練
+        return img
+    return loader
+
+
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
     root = os.path.join(args.data_path, is_train)
-    # dataset = datasets.ImageFolder(root, transform=transform)
-    dataset = ImageFolderWithPath(root, transform=transform)
+    # 預縮圖快取 (--cache_resized N; 預設 0=關, 行為與原版完全一致)。
+    # samples/path 仍是原圖路徑, 只有 loader 讀的來源換成快取小圖。
+    n = int(getattr(args, "cache_resized", 0) or 0)
+    if n > 0:
+        cache_dir = getattr(args, "cache_dir", "./data/_resize_cache")
+        loader = _resized_cache_loader(cache_dir, n)
+        dataset = ImageFolderWithPath(root, transform=transform, loader=loader)
+    else:
+        dataset = ImageFolderWithPath(root, transform=transform)
 
     if is_train == 'train':
         ratio = float(getattr(args, "dataratio", 1.0))

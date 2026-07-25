@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}超參起點 — M4{% endblock %}
+{% block content %}
+  <div class="card">
+    <h2>超參起點 (HyperParams presets)</h2>
+    <div class="muted">這些是各實驗的<strong>起始超參數</strong>；Advisor 從選定的 preset 出發，
+      再視資料/改良迴圈調整。編輯後<strong>立即生效</strong>（存於 <code>agent/presets.json</code>）。
+      內建 default/paper/mae 可修改，也可新增自訂 preset。</div>
+    <form action="presets/reset/" method="post" onsubmit="return confirm('確定把所有 preset 還原為內建預設？自訂的會被移除。')">
+      <button type="submit" class="ghost">全部還原為內建預設</button>
+    </form>
+  </div>
+
+  {% for name, hp in presets.items() %}
+  <div class="card">
+    <h2>{{ name }}
+      {% if name in builtins %}<span class="pill running" style="margin-left:6px">內建</span>
+      {% else %}<span class="pill done" style="margin-left:6px">自訂</span>{% endif %}
+    </h2>
+    <form action="presets/save/" method="post">
+      <input type="hidden" name="name" value="{{ name }}">
+      <div class="row">
+        {% for key, label, typ in fields %}
+        <div style="flex:1 1 150px">
+          <label>{{ label }}</label>
+          <input type="text" name="{{ key }}" value="{{ hp[key] }}"
+                 inputmode="{{ 'decimal' if typ=='float' else 'numeric' }}">
+        </div>
+        {% endfor %}
+      </div>
+      <button type="submit" class="primary">儲存 {{ name }}</button>
+      <button type="submit" class="ghost" formaction="presets/delete/"
+        onclick="return confirm('刪除／還原 {{ name }}？{% if name in builtins %}內建會還原為預設值{% else %}自訂會被刪除{% endif %}')">
+        {% if name in builtins %}還原此組{% else %}刪除此組{% endif %}</button>
+    </form>
+  </div>
+  {% endfor %}
+
+  <div class="card">
+    <h2>新增自訂 preset</h2>
+    <form action="presets/save/" method="post">
+      <label>名稱</label>
+      <input type="text" name="name" placeholder="例：small_lr、strong_reg" required>
+      <div class="row">
+        {% for key, label, typ in fields %}
+        <div style="flex:1 1 150px">
+          <label>{{ label }}</label>
+          <input type="text" name="{{ key }}" placeholder="留空=用 default 值"
+                 inputmode="{{ 'decimal' if typ=='float' else 'numeric' }}">
+        </div>
+        {% endfor %}
+      </div>
+      <button type="submit" class="primary">新增</button>
+      <span class="muted">留空的欄位會採用內建 default 值。</span>
+    </form>
+  </div>
+{% endblock %}

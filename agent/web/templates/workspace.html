@@ -1,0 +1,561 @@
+{% extends "base.html" %}
+{% block title %}工作台 — M4 自動微調 Agent{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<div class="split">
+
+  <!-- 左: 決策討論 -->
+  <div class="pane-left">
+    <div class="card" style="margin-bottom:0" data-key="chat">
+      <h2 style="display:flex;align-items:center;gap:8px">
+        <span style="flex:1">決策討論（LLM ⇄ 你）</span>
+        <span class="cell-tools">
+          <button type="button" data-act="zout" title="縮小內容">−</button>
+          <span class="zl">100%</span>
+          <button type="button" data-act="zin" title="放大內容">＋</button>
+          <button type="button" data-act="full" class="fs" title="全螢幕 / 還原 (Esc)">⛶</button>
+        </span>
+      </h2>
+      <label>目前 run</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <select id="rs-run" onchange="pollRunStatus()" style="flex:1">
+          {% for n in run_names %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
+        </select>
+        <button type="button" onclick="deleteRun()" title="刪除此 run"
+          style="margin:0;background:#f4f5f7;color:#c0392b;padding:8px 10px;flex:0 0 auto">🗑</button>
+      </div>
+      {% if not run_names %}<div class="muted" style="margin-top:8px">尚無 run，先在右方開一個完整流程。</div>{% endif %}
+      <div id="chat-box" data-zoom-target style="height:54vh;overflow-y:auto;border:1px solid #e3e6ea;
+           border-radius:8px;padding:10px;background:#fbfcfe;margin-top:8px">
+        <div class="muted">開始「完整流程」後，LLM 每輪的檢視與決策會出現在這裡；你可以隨時留言引導。</div>
+      </div>
+      <input type="text" id="chat-input" style="margin-top:10px"
+        placeholder="輸入問題或指示（問答 agent 會立即依實驗資料回答；例：哪個 encoder 最好？改用 focal loss；「停止」=中斷）"
+        onkeydown="if(event.key==='Enter') sendDiscuss()">
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button type="button" class="primary" onclick="sendDiscuss()" style="flex:1;margin:0">送出</button>
+        <button type="button" onclick="stopRun()" style="background:#fdeaea;color:#c0392b;margin:0">中斷實驗</button>
+        <button type="button" onclick="resumeRun()" title="從上次停止的地方繼續（重建解答樹後接續下一輪）"
+          style="background:#e7f6ec;color:#1a7f4b;margin:0">繼續實驗</button>
+      </div>
+      <label style="display:inline-block;margin-top:8px;font-size:12px">
+        <input type="checkbox" id="rs-auto" checked style="width:auto"> 自動更新 (4s)</label>
+    </div>
+  </div>
+
+  <!-- 分割線: 拖曳調整左右比例 (雙擊還原預設) -->
+  <div class="split-bar" id="split-bar" title="拖曳調整左右比例（雙擊還原）"></div>
+
+  <!-- 右: notebook -->
+  <div class="pane-right">
+    <div id="gpu-banner" class="banner warn" style="display:none">GPU 目前無法配置 CUDA（可能被外部佔用）。完整流程仍可排入，GPU 釋放後才會實際訓練。</div>
+    <details class="card" {% if not run_names %}open{% endif %}>
+      <summary style="cursor:pointer;font-weight:600;font-size:15px">＋ 新完整流程（多 encoder × 改良迴圈）</summary>
+      <form id="form-full" action="run_full/" method="post" style="margin-top:12px">
+        <label>資料集路徑</label>
+        <input type="text" name="data_path" value="{{ default_data }}">
+        <div class="row">
+          <div><label>決策層 (advisor)</label>
+            <select name="advisor">{% for a in advisors %}<option value="{{ a }}">{{ a }}</option>{% endfor %}</select></div>
+          <div><label>超參起點</label>
+            <select name="preset">{% for p in presets %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select></div>
+          <div><label>主要指標</label><input type="text" name="primary_metric" value="score"></div>
+          <div><label>多 fold 彙整</label>
+            <select name="aggregation"><option value="single">single</option><option value="mean_std">mean_std</option></select></div>
+        </div>
+        <div class="row">
+          <div><label>起手 drafts（跨 encoder）</label><input type="text" name="num_drafts" value="3"></div>
+          <div><label>max_trials（總輪數上限）</label><input type="text" name="max_trials" value="12"></div>
+          <div><label title="至少完成這麼多輪才允許 patience 提早停">min_trials（至少輪數）</label><input type="text" name="min_trials" value="6"></div>
+          <div><label title="連續這麼多輪 improve/resume 無提升才停；draft/debug 不計">patience（無提升容忍）</label><input type="text" name="patience" value="4"></div>
+        </div>
+        <label>引導方向 (guidance)</label>
+        <textarea name="guidance" rows="2" placeholder="例：資料量小且不平衡，優先醫療 DAP encoder + focal loss；先 linear probe 快速篩選。"></textarea>
+        <label style="display:flex;align-items:center;gap:6px;margin:8px 0">
+          <input type="checkbox" name="allow_code_edit" value="1" style="width:auto">
+          允許 LLM 修改訓練程式（除錯失敗 trial 時，以及 improve 階段改良 main_finetune.py；修改版隔離在 run 目錄下執行，原始程式不會被改動）
+        </label>
+        <button type="submit" class="primary">開始完整流程</button>
+      </form>
+    </details>
+    <div id="nb"><div class="muted">右方是 notebook：選一個 run（左上）或開新流程後，這裡即時顯示設定、進行中 trial、histogram、各 trial 參數與曲線、report。</div></div>
+  </div>
+
+</div>
+
+<!-- 解答樹節點 → 跳出式結果對話框 -->
+<div id="trial-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(15,23,42,.5)"
+     onclick="if(event.target===this) closeTrialModal()">
+  <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+    <div class="card" data-key="trial-modal"
+         style="pointer-events:auto;width:min(780px,94vw);max-height:88vh;overflow-y:auto;margin:0;box-shadow:0 12px 40px rgba(0,0,0,.35)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <h2 id="trial-modal-title" style="margin:0;flex:1;font-size:15px;word-break:break-all"></h2>
+        <span class="cell-tools">
+          <button type="button" data-act="zout" title="縮小內容">−</button>
+          <span class="zl">100%</span>
+          <button type="button" data-act="zin" title="放大內容">＋</button>
+          <button type="button" data-act="full" class="fs" title="全螢幕 / 還原">⛶</button>
+        </span>
+        <button type="button" onclick="closeTrialModal()" title="關閉 (Esc)"
+          style="margin:0;background:#f4f5f7;color:#333;padding:4px 10px;flex:0 0 auto">✕</button>
+      </div>
+      <div id="trial-modal-body" data-zoom-target style="margin-top:8px"></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block script %}
+<script>
+function cell(title, meta, body, key){
+  // 每格標題列右側: meta + 縮放/全螢幕工具 (狀態存 _cellUI, 重繪後由 applyCellUI 重套用)
+  const head = title ? `<div class="h"><span>${esc(title)}</span>`
+    +`<span style="display:inline-flex;align-items:center;gap:8px;flex:0 0 auto">${meta||''}${cellToolsHTML()}</span></div>` : '';
+  return `<div class="nb-cell" data-key="${esc(key||title)}">${head}<div class="b">${body}</div></div>`;
+}
+// 逐格更新: 記住上次「產生的內容」, 只有產生的內容真的變了才動那一格 DOM。
+// (以生成字串比對, 而非讀取現場 DOM — 這樣使用者展開 <details>/捲動都不會觸發重畫。)
+function reconcile(container, newHTML){
+  const cache = container._cache || (container._cache = {});
+  const tmp=document.createElement('div'); tmp.innerHTML=newHTML;
+  const news=[...tmp.children];
+  const keys=new Set(news.map(n=>n.getAttribute('data-key')));
+  // 移除已消失的格子
+  [...container.children].forEach(ch=>{ const k=ch.getAttribute('data-key');
+    if(!keys.has(k)){ ch.remove(); delete cache[k]; } });
+  const byKey={}; [...container.children].forEach(ch=>{ byKey[ch.getAttribute('data-key')]=ch; });
+  let prev=null;
+  news.forEach(nn=>{
+    const k=nn.getAttribute('data-key'), nhtml=nn.outerHTML; let el=byKey[k];
+    if(el && cache[k]===nhtml){
+      // 內容和上次一模一樣 → 完全不動這格 DOM
+    } else if(el){
+      // 內容變了 → 保留已展開的 <details> 後更新內部
+      const open=new Set();
+      el.querySelectorAll('details[open]').forEach(d=>{ const s=d.querySelector('summary'); if(s) open.add(s.textContent); });
+      el.innerHTML=nn.innerHTML;
+      el.querySelectorAll('details').forEach(d=>{ const s=d.querySelector('summary'); if(s && open.has(s.textContent)) d.open=true; });
+      cache[k]=nhtml;
+    } else {
+      el=nn; byKey[k]=el; cache[k]=nhtml;   // 新格子
+    }
+    const ref = prev ? prev.nextSibling : container.firstChild;
+    if(ref!==el) container.insertBefore(el, ref);
+    prev=el;
+  });
+}
+// ---- 解答樹 (AIDE 式搜尋; search_tree.json) ------------------------------
+// stage 色盤 (已驗證 CVD all-pairs; 形狀=第二編碼):
+// draft=方形藍 improve=圓形綠 debug=菱形紫紅 resume=三角形橙
+const STAGE_COLORS={draft:'#2d6cdf', improve:'#1a9e5c', debug:'#b5179e', resume:'#e8710a'};
+const STAGE_LABELS={draft:'draft（新起點）', improve:'improve（改良）',
+                    debug:'debug（除錯）', resume:'resume（繼續訓練）'};
+function treeNodeShape(stage, cx, cy, fill, extra){
+  if(stage==='draft')  return `<rect x="${cx-11}" y="${cy-11}" width="22" height="22" rx="4" fill="${fill}" ${extra}/>`;
+  if(stage==='debug')  return `<path d="M ${cx} ${cy-13} L ${cx+13} ${cy} L ${cx} ${cy+13} L ${cx-13} ${cy} Z" fill="${fill}" ${extra}/>`;
+  if(stage==='resume') return `<path d="M ${cx} ${cy-13} L ${cx+13} ${cy+10} L ${cx-13} ${cy+10} Z" fill="${fill}" ${extra}/>`;
+  return `<circle cx="${cx}" cy="${cy}" r="12" fill="${fill}" ${extra}/>`;
+}
+function svgTree(tree, cmap){
+  const nodes=tree.nodes||[]; if(!nodes.length) return '<div class="muted">（尚無節點）</div>';
+  // tidy layout: leaf 依序排 x, 內部節點取子樹中點; y=樹深度
+  const pos={}; let leaf=0, maxD=0;
+  function place(i,d){
+    maxD=Math.max(maxD,d);
+    const kids=nodes[i].children||[]; let x;
+    if(!kids.length){ x=leaf++; }
+    else { const xs=kids.map(c=>place(c,d+1)); x=(Math.min(...xs)+Math.max(...xs))/2; }
+    pos[i]={x,y:d}; return x;
+  }
+  nodes.forEach((n,i)=>{ if(n.parent===null||n.parent===undefined) place(i,0); });
+  const R=13, hgap=64, vgap=78, padX=30, padT=26, padB=34;
+  const maxX=Math.max(...Object.values(pos).map(p=>p.x));
+  const W=padX*2+maxX*hgap+R*2, H=padT+maxD*vgap+R*2+padB;
+  const X=i=>padX+R+pos[i].x*hgap, Y=i=>padT+R+pos[i].y*vgap;
+  let g=`<svg viewBox="0 0 ${W} ${H}" width="${Math.min(W,640)}" style="max-width:100%">`;
+  // 邊: 先畫線, 節點蓋在上面
+  nodes.forEach((n,i)=>{ if(n.parent!==null&&n.parent!==undefined&&pos[n.parent])
+    g+=`<line x1="${X(n.parent)}" y1="${Y(n.parent)+R}" x2="${X(i)}" y2="${Y(i)-R}" stroke="#ccd0d6" stroke-width="1.5"/>`; });
+  nodes.forEach((n,i)=>{
+    const cx=X(i), cy=Y(i), fill=STAGE_COLORS[n.stage]||'#6b7280';
+    const isBest=(tree.best===i), tShort=(n.trial_id||('#'+i)).split('_').pop();
+    let extra='';
+    if(n.is_buggy) extra='stroke="#c0392b" stroke-width="2" stroke-dasharray="4 3"';
+    else if(isBest) extra='stroke="#1f2a44" stroke-width="2.5"';
+    const mut=n.mutation||''; const mutShort=(mut.includes(':')?mut.slice(mut.indexOf(':')+1):mut);
+    const tip=[n.trial_id, n.encoder?('encoder='+n.encoder):'',
+               'stage='+n.stage+(n.debug_depth?(' (debug_depth='+n.debug_depth+')'):'')
+                              +(n.resume_depth?(' (resume_depth='+n.resume_depth+')'):''),
+               n.is_buggy?'狀態=失敗':('metric='+fmt(n.metric)), mut?('mutation='+mut):'',
+               (n.select_prob!=null&&n.select_prob<1)?('policy 依指標抽中此起點的機率='+(n.select_prob*100).toFixed(0)+'%'):'',
+               isBest?'★ 全域最佳':''].filter(Boolean).join('\n');
+    const tid=n.trial_id||'';
+    g+=`<g ${tid?`data-tid="${esc(tid)}" style="cursor:pointer"`:'style="cursor:default"'}>`
+      +`<title>${esc(tip)}${tid?'\n（點擊節點看完整結果）':''}</title>`;
+    g+=treeNodeShape(n.stage, cx, cy, fill, extra);
+    // 節點上方: encoder 識別 (小色點 + 縮寫; 顏色與 histogram 一致)
+    if(n.encoder && cmap){
+      const abbrev=n.encoder.length>10?n.encoder.slice(0,9)+'…':n.encoder;
+      g+=`<circle cx="${cx-abbrev.length*2-7}" cy="${cy-R-8}" r="2.5" fill="${encColor(cmap,n.encoder)}"/>`;
+      g+=`<text x="${cx}" y="${cy-R-5}" font-size="7.5" text-anchor="middle" fill="none" stroke="#fff" stroke-width="2.5" stroke-linejoin="round">${esc(abbrev)}</text>`
+        +`<text x="${cx}" y="${cy-R-5}" font-size="7.5" text-anchor="middle" fill="#6b7280">${esc(abbrev)}</text>`;
+    }
+    g+=`<text x="${cx}" y="${cy+(n.stage==='resume'?6:3.5)}" font-size="9" font-weight="700" fill="#fff" text-anchor="middle">${esc(tShort)}</text>`;
+    // 雙層文字: 底層白描邊 + 上層填色 → 邊線穿過時仍可讀 (不依賴 paint-order 支援度)
+    const haloText=(x,y,size,fill,content,weight)=>
+      `<text x="${x}" y="${y}" font-size="${size}" ${weight?`font-weight="${weight}"`:''} text-anchor="middle" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round">${content}</text>`
+      +`<text x="${x}" y="${y}" font-size="${size}" ${weight?`font-weight="${weight}"`:''} text-anchor="middle" fill="${fill}">${content}</text>`;
+    if(isBest) g+=haloText(cx+R+7, cy-R+4, 11, '#1f2a44', '★');
+    if(n.is_buggy)
+      g+=haloText(cx, cy+R+13, 9, '#c0392b', '✗ 失敗');
+    else
+      g+=haloText(cx, cy+R+13, 10, '#1f2a44', n.metric==null?'…':(+n.metric).toFixed(3), 600);
+    if(mutShort) g+=haloText(cx, cy+R+24, 8, '#6b7280', esc(mutShort.length>14?mutShort.slice(0,13)+'…':mutShort));
+    g+='</g>';
+  });
+  return g+'</svg>';
+}
+function svgTreeAll(treeData, cmap){
+  if(!treeData) return '<div class="muted">（尚無解答樹；第一個 trial 完成後出現）</div>';
+  let h='';
+  if(Array.isArray(treeData.nodes)){
+    // 新格式: 單一全域解答樹 (draft 跨 encoder; 節點上方標 encoder)
+    if(!treeData.nodes.length) return '<div class="muted">（尚無解答樹；第一個 trial 完成後出現）</div>';
+    h+='<div style="overflow-x:auto">'+svgTree(treeData, cmap)+'</div>';
+  } else {
+    // 舊格式 (相容既有 run): encoder -> 各自一棵樹
+    const keys=Object.keys(treeData);
+    if(!keys.length) return '<div class="muted">（尚無解答樹；第一個 trial 完成後出現）</div>';
+    h+='<div style="display:flex;flex-wrap:wrap;gap:18px">';
+    keys.forEach(k=>{
+      const t=treeData[k]||{}, n=(t.nodes||[]).length;
+      h+='<div style="flex:0 1 auto;min-width:180px">'
+        +`<div style="font-size:12px;font-weight:600;margin-bottom:2px"><span style="color:${encColor(cmap,k)}">●</span> ${esc(k)} <span class="muted">${n} 節點</span></div>`
+        +svgTree(t, null)+'</div>';
+    });
+    h+='</div>';
+  }
+  h+='<div style="font-size:11px;color:#444;margin-top:6px;display:flex;flex-wrap:wrap;gap:12px">'
+    +`<span><svg width="14" height="14" viewBox="0 0 26 26" style="vertical-align:-2px">${treeNodeShape('draft',13,13,STAGE_COLORS.draft,'')}</svg> ${STAGE_LABELS.draft}</span>`
+    +`<span><svg width="14" height="14" viewBox="0 0 26 26" style="vertical-align:-2px">${treeNodeShape('improve',13,13,STAGE_COLORS.improve,'')}</svg> ${STAGE_LABELS.improve}</span>`
+    +`<span><svg width="14" height="14" viewBox="0 0 26 26" style="vertical-align:-2px">${treeNodeShape('debug',13,13,STAGE_COLORS.debug,'')}</svg> ${STAGE_LABELS.debug}</span>`
+    +`<span><svg width="14" height="14" viewBox="0 0 26 26" style="vertical-align:-2px">${treeNodeShape('resume',13,13,STAGE_COLORS.resume,'')}</svg> ${STAGE_LABELS.resume}</span>`
+    +'<span style="color:#c0392b">✗ 虛線框=失敗 trial</span>'
+    +'<span style="color:#1f2a44">★ 實線框=全域最佳</span>'
+    +'<span class="muted">節點上方=encoder；下方=primary 分數與變異；游標移到節點看摘要，<b>點擊節點跳出完整結果</b></span>'
+    +'</div>';
+  return h;
+}
+function trialCard(t, cmap){
+  const r=t.recipe, c=encColor(cmap, r.encoder.model_key), hp=r.hparams||{}, prov=r.provenance||{}, cv=t.curves||{};
+  const regs=(r.regularizers||[]).map(x=>x.name).join(', ')||'—';
+  const loss=(r.losses||[]).map(x=>x.name).join(', ')||'—';
+  const head=(r.heads&&r.heads[0])?r.heads[0].type:'—';
+  let h='<table class="kv">';
+  h+=`<tr><td>encoder</td><td><span style="color:${c}">●</span> ${esc(r.encoder.model_key)} (${r.encoder.adaptation})</td></tr>`;
+  h+=`<tr><td>head / pooling</td><td>${head} / ${r.pooling}</td></tr>`;
+  h+=`<tr><td>loss / regularizers</td><td>${esc(loss)} / ${esc(regs)}</td></tr>`;
+  h+=`<tr><td>augmentation</td><td>${r.augmentation?esc(r.augmentation.name):'—'}</td></tr>`;
+  h+=`<tr><td>hparams</td><td>bs=${hp.batch_size} · epochs=${hp.epochs} · blr=${hp.blr} · layer_decay=${hp.layer_decay} · drop_path=${hp.drop_path} · wd=${hp.weight_decay}${hp.num_workers!=null?(' · workers='+hp.num_workers):''}</td></tr>`;
+  if(t.gpu_stats && t.gpu_stats.util_avg!=null){
+    const g=t.gpu_stats, low=g.util_avg<60;
+    h+=`<tr><td>GPU</td><td>利用率 avg <b${low?' style="color:#9a5b12"':''}>${g.util_avg}%</b>（median ${g.util_median}%）· 記憶體峰值 ${(g.mem_peak_mb/1024).toFixed(1)}/${(g.mem_total_mb/1024).toFixed(1)} GB${low?' <span class="muted">（偏低，下一輪自動調整）</span>':''}</td></tr>`;
+  }
+  h+=`<tr><td>primary</td><td><b>${fmt(t.primary_score)}</b></td></tr>`;
+  if(t.metrics && Object.keys(t.metrics).length) h+=`<tr><td>metrics</td><td class="muted">${esc(JSON.stringify(t.metrics))}</td></tr>`;
+  h+='</table>';
+  const why=[];
+  if(r.encoder.rationale) why.push('選 encoder：'+r.encoder.rationale);
+  if(prov.rationale) why.push('組 recipe：'+prov.rationale);
+  if(prov.reason) why.push('改良：'+prov.reason);
+  if(prov.mutation && prov.mutation!=='-' && prov.mutation!=='none') why.push('mutation = '+prov.mutation);
+  if(prov.hparam_changes){
+    const chs=Object.entries(prov.hparam_changes).map(([k,c])=>k+': '+c.from+'→'+c.to).join('、');
+    why.push('超參調整（'+chs+'）原因：'+(prov.hparam_reason||'—'));
+  }
+  if(prov.gpu_opt){
+    const chs=Object.entries(prov.gpu_opt.changes||{}).map(([k,c])=>k+': '+c.from+'→'+c.to).join('、');
+    why.push('⚡ GPU 最佳化：'+esc(prov.gpu_opt.from_trial||'')+' 利用率 '+prov.gpu_opt.util_avg+'%（目標 ≥'+prov.gpu_opt.target+'%）→ '+chs);
+  }
+  if(why.length) h+='<div class="banner ok" style="margin-top:6px">🧠 決策理由（advisor='+esc(prov.advisor||'?')+'）<br>'+why.map(esc).join('<br>')+'</div>';
+  h+='<div class="row" style="margin-top:6px">'
+    +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Loss（train / val）</div>'
+      +svgLine([{name:'train_loss', color:'#c0392b', data:cv.train_loss},
+                {name:'val_loss',   color:'#e8710a', data:cv.val_loss, best:'min'}])+'</div>'
+    +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Score / 指標（val · 0–1）</div>'
+      +svgLine([{name:'score',    color:'#1a9e5c', data:cv.val_score, best:'max'},
+                {name:'accuracy', color:'#2d6cdf', data:cv.val_accuracy},
+                {name:'roc_auc',  color:'#b5179e', data:cv.val_roc_auc},
+                {name:'f1',       color:'#00838f', data:cv.val_f1}])+'</div>'
+    +'</div>';
+  if(t.cm_img) h+=`<div style="margin-top:6px"><span class="muted">confusion matrix (test)</span><br><img src="${t.cm_img}" style="max-width:260px;border-radius:6px"></div>`;
+  return h;
+}
+// ---- 解答樹節點 → 跳出式結果對話框 --------------------------------------
+let _lastRun=null;
+function openTrialModal(tid){
+  const m=document.getElementById('trial-modal');
+  const title=document.getElementById('trial-modal-title');
+  const body=document.getElementById('trial-modal-body');
+  const d=_lastRun||{};
+  let t=(d.done||[]).find(x=>x.trial_id===tid), note='';
+  if(!t && d.rt && d.rt.trial_id===tid){
+    t=d.rt;
+    note='<div class="banner ok">⏳ 此 trial 仍在進行中，以下為即時參數與曲線。</div>';
+  }
+  title.textContent='trial：'+tid;
+  if(t){
+    const pill=`<span class="pill ${t.status}">${t.status}</span>`;
+    body.innerHTML=note
+      +`<div style="margin-bottom:6px">${pill}`
+      +(t.message?(' <span class="muted">'+esc(t.message)+'</span>'):'')+'</div>'
+      +trialCard(t, d.cmap||{});
+  } else {
+    body.innerHTML='<div class="muted">此節點的 trial 尚無結果資料（可能剛排入、或尚未寫入 ledger）。</div>';
+  }
+  m.style.display='block';
+}
+function closeTrialModal(){ document.getElementById('trial-modal').style.display='none'; }
+document.addEventListener('keydown', e=>{
+  if(e.key!=='Escape') return;
+  const m=document.getElementById('trial-modal');
+  if(m && m.style.display!=='none'){ closeTrialModal(); return; }  // 先關對話框
+  exitAllFullscreen();                                             // 再退出單格全螢幕
+});
+// 事件委派: notebook 內容每次輪詢會重繪, 監聽掛在容器上才不會失效
+(function(){
+  const nb=document.getElementById('nb');
+  if(nb) nb.addEventListener('click', e=>{
+    const g=e.target.closest ? e.target.closest('g[data-tid]') : null;
+    if(g){ const tid=g.getAttribute('data-tid'); if(tid) openTrialModal(tid); }
+  });
+})();
+// 載入指示: 首次載入 / 切換 run 時顯示 spinner 與頂部進度條 (之後的輪詢靜默更新)
+let _loadedRun=null;
+function _loadbar(on){ const b=document.getElementById('loadbar'); if(b) b.classList.toggle('on', !!on); }
+function _showLoading(nb){
+  _loadbar(true);
+  nb._cache={};
+  nb.innerHTML='<div class="muted" style="text-align:center;padding:48px 0">'
+    +'<span class="spin"></span><div style="margin-top:10px">載入實驗資料中…（trial 越多越久）</div></div>';
+  const box=document.getElementById('chat-box');
+  if(box){ _chatSig='';
+    box.innerHTML='<div class="muted" style="text-align:center;padding:24px 0">'
+      +'<span class="spin"></span><div style="margin-top:8px">載入討論中…</div></div>'; }
+}
+async function pollRunStatus(){
+  const sel=document.getElementById('rs-run'), nb=document.getElementById('nb');
+  if(!sel || !sel.value){ return; }
+  if(_loadedRun!==sel.value) _showLoading(nb);
+  let j;
+  try { j = await (await fetch('run_status/?run='+encodeURIComponent(sel.value))).json(); }
+  catch(e){ _loadbar(false); nb.innerHTML='<div class="banner warn">連線失敗</div>'; return; }
+  if(!j.ok){ _loadbar(false); nb.innerHTML='<div class="banner warn">'+(j.error||'錯誤')+'</div>'; return; }
+  const cmap={}, done=j.trials||[], cur=j.current, rt=j.running_trial;
+  _lastRun={done, rt, cmap};   // 供解答樹節點點擊 → 跳出式結果對話框查資料
+  let html='';
+  // 進度 cell
+  let prog=`已完成 <b>${j.n_done}</b> trials`;
+  if(cur && cur.status){
+    const pill=`<span class="pill ${cur.status}">${cur.status}</span>`;
+    const ep=(cur.cur_epoch==null?'?':cur.cur_epoch+1)+' / '+(cur.total_epochs||'?');
+    prog+=`<div style="margin-top:6px">${pill} 當前 trial epoch <b>${ep}</b> <span class="muted">· ${cur.percent}%</span></div>`
+      +`<div class="bar" style="margin-top:4px"><span style="width:${cur.percent}%"></span></div>`;
+  }
+  html+=cell('進度', j.stopped?'<span class="pill error">已要求中斷</span>':'', prog, 'progress');
+  // 設定 cell
+  if(j.config) html+=cell('本次 run 設定 (config.yaml)','', '<pre style="max-height:240px">'+esc(j.config)+'</pre>', 'config');
+  // 進行中 trial cell
+  if(rt && rt.recipe && rt.recipe.encoder) html+=cell('⏳ 進行中 trial（即時參數 + 曲線）', esc(rt.trial_id), trialCard(rt, cmap), 'running');
+  // histogram cell
+  const bars=done.filter(t=>t.status==='done').map(t=>({label:t.trial_id.length>34?'…'+t.trial_id.slice(-32):t.trial_id,
+    value:t.primary_score||0, color:encColor(cmap, t.recipe.encoder.model_key)}));
+  html+=cell('結果 histogram（各 trial primary · 顏色=encoder）','', svgBars(bars), 'histogram');
+  // 解答樹 cell (AIDE 式搜尋)
+  if(j.search_tree && Object.keys(j.search_tree).length)
+    html+=cell('🌳 解答樹（AIDE 式搜尋：先開滿 draft → 每輪依指標機率選節點 improve/debug/resume）','', svgTreeAll(j.search_tree, cmap), 'tree');
+  // 各完成 trial cells
+  done.slice().reverse().forEach(t=>{ html+=cell('trial：'+t.trial_id, `<span class="pill ${t.status}">${t.status}</span>`, trialCard(t, cmap), 'trial:'+t.trial_id); });
+  // report cell
+  if(j.report) html+=cell('report.md','', '<pre style="max-height:300px">'+esc(j.report)+'</pre>', 'report');
+  // LLM 完整提示詞與回應: 每次呼叫獨立成格 (key=ts) → 已展開的呼叫不會因輪詢/新呼叫而重載
+  const calls=j.llm_calls||[];
+  if(calls.length){
+    html+=cell('🔍 LLM 完整提示詞與回應', calls.length+' 次',
+      '<div class="muted">每次呼叫獨立顯示；展開後不會因輪詢或新呼叫而重新載入。</div>', 'llm-header');
+    calls.forEach((c,ci)=>{
+      const badge = c.ok===false ? '<span class="pill error">失敗</span>' : '<span class="pill done">ok</span>';
+      const body='<details style="border:1px solid #e3e6ea;border-radius:8px;padding:6px 10px">'
+        +'<summary style="cursor:pointer;font-size:13px">'+badge+' <b>'+esc(c.label||'call')+'</b>'
+        +(c.attempt?(' · retry '+c.attempt):'')+' <span class="muted">'+esc(c.model||'')+'</span></summary>'
+        +(c.error?('<div class="banner warn" style="margin-top:6px">'+esc(c.error)+'</div>'):'')
+        +'<label>system prompt</label><pre style="max-height:200px">'+esc(c.system||'')+'</pre>'
+        +'<label>user prompt</label><pre style="max-height:260px">'+esc(c.prompt||'')+'</pre>'
+        +(c.thinking?('<label>thinking</label><pre style="max-height:200px">'+esc(c.thinking)+'</pre>'):'')
+        +'<label>回應 (raw)</label><pre style="max-height:260px">'+esc(c.response||'(無)')+'</pre>'
+        +'</details>';
+      html+=cell('', '', body, 'llm:'+(c.ts||ci));
+    });
+  }
+  reconcile(nb, html);   // 逐格更新, 不整頁重建 → 不閃爍、保留展開/捲動
+  applyCellUI(nb);       // 重繪後重套用各格的縮放層級 / 全螢幕狀態
+  renderChat(j.conversation||[], j.stopped, j.qa_stream);
+  _loadedRun=sel.value; _loadbar(false);
+  // QA streaming 中: 加速輪詢 (0.7s) 讓文字流暢滾出; 結束後回到 4s 節奏
+  clearTimeout(window._qaFastT);
+  if(j.qa_stream) window._qaFastT=setTimeout(pollRunStatus, 700);
+}
+// GPU 狀態: 頁面載好後非同步查 (原本在渲染前同步查, GPU 被占用時會卡住頁面最多 15 秒)
+(async function(){
+  try{
+    const j=await (await fetch('gpu/')).json();
+    if(!j.allocatable){ const b=document.getElementById('gpu-banner'); if(b) b.style.display=''; }
+  }catch(_){}
+})();
+// ---- 聊天 ----
+const WHO={llm:'🤖 LLM', user:'🧑 你', system:'⚙️ 系統'};
+const KIND_LABELS={qa:'💬 問答', review:'檢視', decision:'決策', status:'狀態',
+                   final:'結束', user_msg:'留言'};
+function chatStyle(role){
+  if(role==='user') return 'align-self:flex-end;background:#e7f6ec;border:1px solid #b7e4c7';
+  if(role==='llm')  return 'align-self:flex-start;background:#eaf1fd;border:1px solid #cfe0fb';
+  return 'align-self:center;background:#f4f5f7;border:1px solid #e3e6ea;color:#555;font-size:12px';
+}
+let _chatSig='';
+function renderChat(entries, stopped, qa){
+  const box=document.getElementById('chat-box'); if(!box) return;
+  const sig = entries.length+'|'+(entries.length?entries[entries.length-1].ts:'')+'|'+stopped
+            +'|'+(qa?('s'+(qa.text||'').length):'');
+  if(sig===_chatSig) return;   // 內容沒變就不重建 → 不閃爍
+  _chatSig=sig;
+  if(!entries.length && !qa){ box.innerHTML='<div class="muted">尚無討論。開始完整流程後會出現 LLM 的檢視與決策。</div>'; return; }
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  // QA streaming 中: 打字氣泡 (未有文字=思考中; 有文字=逐段顯示 + 閃爍游標)
+  let streamHtml='';
+  if(qa){
+    const body = qa.text
+      ? esc(qa.text)+'<span class="qa-caret">▌</span>'
+      : '<span class="spin" style="width:12px;height:12px;border-width:2px;vertical-align:-2px"></span> 正在依實驗資料思考…';
+    streamHtml=`<div style="max-width:90%;margin:5px 0;padding:7px 10px;border-radius:10px;${chatStyle('llm')}">`
+      +`<div style="font-size:10px;opacity:.7">🤖 LLM · 💬 問答中…</div>`
+      +`<div style="font-size:13px;white-space:pre-wrap">${body}</div></div>`;
+  }
+  box.innerHTML = entries.map(e=>{
+    const r=e.role||'system';
+    return `<div style="max-width:90%;margin:5px 0;padding:7px 10px;border-radius:10px;${chatStyle(r)}">`
+      +`<div style="font-size:10px;opacity:.7">${WHO[r]||r}${e.kind?(' · '+(KIND_LABELS[e.kind]||esc(e.kind))):''}${e.round!=null?(' · round '+e.round):''}</div>`
+      +`<div style="font-size:13px;white-space:pre-wrap">${esc(e.text||'')}</div></div>`;
+  }).join('') + streamHtml
+    + (stopped?'<div class="banner warn" style="margin-top:6px">已要求中斷實驗。</div>':'');
+  if(atBottom || qa) box.scrollTop = box.scrollHeight;
+}
+async function sendDiscuss(){
+  const run=document.getElementById('rs-run'), inp=document.getElementById('chat-input');
+  if(!run||!run.value){ alert('請先選一個 run'); return; }
+  if(!inp.value.trim()) return;
+  const fd=new FormData(); fd.append('run', run.value); fd.append('text', inp.value.trim());
+  try { await fetch('discuss/',{method:'POST',body:fd}); } catch(e){}
+  inp.value=''; pollRunStatus();
+  setTimeout(pollRunStatus, 600);   // QA 串流檔剛建立時儘快接上打字氣泡
+}
+async function stopRun(){
+  const run=document.getElementById('rs-run');
+  if(!run||!run.value){ alert('請先選一個 run'); return; }
+  if(!confirm('確定中斷這個實驗？正在跑的 trial 會先完成再停止。')) return;
+  const fd=new FormData(); fd.append('run', run.value);
+  try { await fetch('stop_run/',{method:'POST',body:fd}); } catch(e){}
+  pollRunStatus();
+}
+async function resumeRun(){
+  const run=document.getElementById('rs-run');
+  if(!run||!run.value){ alert('請先選一個 run'); return; }
+  if(!confirm('從上次停止的地方繼續實驗「'+run.value+'」？\n（載入既有 trial 與解答樹後接續下一輪；若已達 max_trials 會立即依停止條件結束）')) return;
+  const fd=new FormData(); fd.append('run', run.value);
+  try{
+    const j=await (await fetch('resume_run/',{method:'POST',body:fd})).json();
+    if(!j.ok){ alert('無法繼續：'+(j.error||'未知')); return; }
+  }catch(e){ alert('無法繼續：'+e); return; }
+  pollRunStatus();
+}
+// 開始完整流程: AJAX 送出 + 等待 UI, 完成後自動選到新 run
+const _formFull=document.getElementById('form-full');
+if(_formFull){
+  _formFull.addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const btn=_formFull.querySelector('button[type=submit]'), old=btn.textContent;
+    btn.disabled=true; btn.textContent='⏳ 建立實驗中…';
+    const fd=new FormData(_formFull); fd.append('ajax','1');
+    try{
+      const j=await (await fetch('run_full/',{method:'POST',body:fd})).json();
+      if(j.ok && j.run){
+        const sel=document.getElementById('rs-run');
+        if(![...sel.options].some(o=>o.value===j.run)){
+          const o=document.createElement('option'); o.value=j.run; o.textContent=j.run; sel.insertBefore(o, sel.firstChild);
+        }
+        sel.value=j.run;
+        const det=_formFull.closest('details'); if(det) det.open=false;
+        pollRunStatus();
+      } else { alert('建立失敗：'+(j.error||'未知')); }
+    }catch(err){ alert('建立失敗：'+err); }
+    finally{ btn.disabled=false; btn.textContent=old; }
+  });
+}
+async function deleteRun(){
+  const sel=document.getElementById('rs-run'); if(!sel||!sel.value){ alert('請先選一個 run'); return; }
+  const run=sel.value;
+  if(!confirm('確定刪除 run「'+run+'」？此動作無法復原（會刪除整個 runs/'+run+' 目錄）。')) return;
+  const fd=new FormData(); fd.append('run', run);
+  try{
+    const j=await (await fetch('delete_run/',{method:'POST',body:fd})).json();
+    if(!j.ok){ alert('刪除失敗：'+(j.error||'')); return; }
+  }catch(e){ alert('刪除失敗：'+e); return; }
+  const opt=[...sel.options].find(o=>o.value===run); if(opt) opt.remove();
+  const nb=document.getElementById('nb'); if(nb) nb._cache={};
+  _chatSig=''; _loadedRun=null;
+  if(sel.options.length){ sel.selectedIndex=0; pollRunStatus(); }
+  else {
+    if(nb) nb.innerHTML='<div class="muted">已無 run。開一個新的完整流程吧。</div>';
+    const box=document.getElementById('chat-box'); if(box) box.innerHTML='<div class="muted">尚無討論。</div>';
+  }
+}
+// ---- 左右分割線: 拖曳調整比例; 雙擊還原; 寬度記在 localStorage ----
+(function(){
+  const bar=document.getElementById('split-bar'), left=document.querySelector('.pane-left');
+  if(!bar || !left) return;
+  const KEY='m4_split_left_px', DEF=420, MIN=260, RIGHT_MIN=320;
+  const saved=parseFloat(localStorage.getItem(KEY));
+  if(saved>=MIN) left.style.flexBasis=saved+'px';
+  let dragging=false;
+  bar.addEventListener('mousedown', e=>{
+    dragging=true; bar.classList.add('dragging'); e.preventDefault();
+    document.body.style.userSelect='none'; document.body.style.cursor='col-resize';
+  });
+  document.addEventListener('mousemove', e=>{
+    if(!dragging) return;
+    const rect=left.parentElement.getBoundingClientRect();
+    let w=e.clientX-rect.left;                       // 游標位置 ≈ 左欄寬
+    w=Math.max(MIN, Math.min(rect.width-RIGHT_MIN, w));
+    left.style.flexBasis=w.toFixed(0)+'px';
+  });
+  document.addEventListener('mouseup', ()=>{
+    if(!dragging) return;
+    dragging=false; bar.classList.remove('dragging');
+    document.body.style.userSelect=''; document.body.style.cursor='';
+    const w=parseFloat(left.style.flexBasis);
+    if(w) localStorage.setItem(KEY, w);
+  });
+  bar.addEventListener('dblclick', ()=>{
+    left.style.flexBasis=DEF+'px'; localStorage.setItem(KEY, DEF);
+  });
+})();
+(function(){  // 支援 /?run=<name> 深連結
+  const p=new URLSearchParams(location.search).get('run'), s=document.getElementById('rs-run');
+  if(p&&s) for(const o of s.options) if(o.value===p){ s.value=p; break; }
+})();
+if (document.getElementById('rs-run') && document.getElementById('rs-run').value){
+  pollRunStatus();
+  setInterval(()=>{ const a=document.getElementById('rs-auto'); if(a&&a.checked) pollRunStatus(); }, 4000);
+}
+</script>
+{% endblock %}

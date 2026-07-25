@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}背景工作 — M4{% endblock %}
+{% block content %}
+  <div class="card">
+    <h2>背景訓練工作</h2>
+    <table><thead><tr><th>job</th><th>encoder</th><th>preset</th><th>狀態</th><th>primary</th></tr></thead>
+      <tbody id="jobs-body">
+      {% for jid, j in jobs.items() %}
+      <tr><td>{{ jid }}</td><td>{{ j.encoder or '(auto)' }}</td><td>{{ j.preset }}</td>
+        <td><span class="pill {{ j.status }}">{{ j.status }}</span></td>
+        <td>{{ '%.4f'|format(j.primary_score) if j.get('primary_score') else '—' }}</td></tr>
+      {% endfor %}
+      </tbody></table>
+    {% if not jobs %}<div class="muted" id="jobs-empty">尚無背景工作。到「工作台」開完整流程，或到「新實驗」開單一 trial。</div>{% endif %}
+  </div>
+{% endblock %}
+{% block script %}
+<script>
+setInterval(async () => {
+  let j; try { j = await (await fetch('jobs/')).json(); } catch(e){ return; }
+  const rows = Object.entries(j).map(([jid, x]) =>
+    `<tr><td>${jid}</td><td>${esc(x.encoder||'(auto)')}</td><td>${esc(x.preset||'')}</td>`
+    + `<td><span class="pill ${x.status}">${x.status}</span></td>`
+    + `<td>${x.primary_score!=null ? Number(x.primary_score).toFixed(4) : '—'}</td></tr>`).join('');
+  const tb=document.getElementById('jobs-body');
+  if(tb && rows){ tb.innerHTML=rows; const e=document.getElementById('jobs-empty'); if(e) e.remove(); }
+}, 5000);
+</script>
+{% endblock %}

@@ -56,6 +56,17 @@ def get_args_parser():
     parser.add_argument("--cls_token", action="store_false", dest="global_pool",
                         help="Use class token instead of global pool for classification")
 
+    # ---- Recipe components (P3, agent/) — 皆預設為現有行為, 不帶旗標時與原版一致
+    parser.add_argument("--head_type", default="linear", choices=["linear", "mlp"],
+                        help="Classifier head type. linear=原本單層 (default); mlp=多層")
+    parser.add_argument("--head_hidden_dims", type=int, nargs="+", default=None,
+                        help="mlp head 各隱藏層維度, e.g. --head_hidden_dims 512")
+    parser.add_argument("--head_dropout", type=float, default=0.0, help="mlp head dropout")
+    parser.add_argument("--loss", default="cross_entropy",
+                        choices=["cross_entropy", "weighted_ce", "focal"],
+                        help="分類損失。cross_entropy=原本 (default); weighted_ce=類別加權; focal")
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="focal loss gamma")
+
     # ---- Optimizer parameters
     parser.add_argument("--clip_grad", type=float, default=None, metavar="NORM", help="Clip grad norm")
     parser.add_argument("--weight_decay", type=float, default=0.05, help="Weight decay")
@@ -113,12 +124,28 @@ def get_args_parser():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--resume", default="", help="Resume full state (optimizer, scaler, etc.)")
+    parser.add_argument("--more_epochs", default=0, type=int,
+                        help="With --resume: continue training this many extra epochs "
+                             "beyond the checkpoint's epoch, writing to the new --task/--output_dir "
+                             "(instead of restoring the checkpoint's task/epochs)")
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N")
     parser.add_argument("--eval", action="store_true", help="Evaluation only")
     parser.add_argument("--dist_eval", action="store_true", default=False,
                         help="Distributed evaluation (faster monitoring during training)")
     parser.add_argument("--num_workers", default=10, type=int)
     parser.add_argument("--pin_mem", action="store_true"); parser.set_defaults(pin_mem=True)
+    # 資料管線效能旗標 (預設關, 不帶旗標時與原版行為完全一致):
+    parser.add_argument("--persistent_workers", action="store_true", default=False,
+                        help="DataLoader persistent_workers: 跨 epoch 保留 worker pool "
+                             "(小資料集省大量 worker 重啟時間; epoch>=1 的增強亂數流"
+                             "與原版統計等價但非逐位相同)")
+    parser.add_argument("--prefetch_factor", default=None, type=int,
+                        help="DataLoader prefetch_factor (None = torch 預設 2)")
+    parser.add_argument("--cache_resized", default=0, type=int,
+                        help="預縮圖磁碟快取: >0 時原圖短邊縮到此大小後快取, 訓練從快取讀 "
+                             "(大幅降低高解析度影像的 decode 成本; 0=關)")
+    parser.add_argument("--cache_dir", default="./data/_resize_cache", type=str,
+                        help="--cache_resized 的快取目錄")
 
     # ---- Distributed
     parser.add_argument("--world_size", default=1, type=int)
@@ -139,14 +166,112 @@ def get_args_parser():
 # =========================
 # Main
 # =========================
+# =========================
+# Recipe components (P3) — 可組合的 head / loss。皆為附加式:
+# --head_type linear + --loss cross_entropy (預設) 時與原版行為完全一致。
+# =========================
+class MLPHead(torch.nn.Module):
+    """多層分類頭 (取代原本單層 Linear model.head)。"""
+
+    def __init__(self, in_features, num_classes, hidden_dims, dropout=0.0):
+        super().__init__()
+        layers, dim = [], in_features
+        for h in (hidden_dims or []):
+            layers += [torch.nn.Linear(dim, h), torch.nn.GELU()]
+            if dropout > 0:
+                layers.append(torch.nn.Dropout(dropout))
+            dim = h
+        self.mlp = torch.nn.Sequential(*layers)
+        self.out = torch.nn.Linear(dim, num_classes)
+        # 對齊原本 head 的初始化慣例 (lp 凍結以 name 內含 "head" 判斷, MLPHead 各參數皆符合)
+        trunc_normal_(self.out.weight, std=2e-5)
+
+    def forward(self, x):
+        return self.out(self.mlp(x))
+
+
+class FocalLoss(torch.nn.Module):
+    """multi-class focal loss (類別不平衡)。"""
+
+    def __init__(self, gamma=2.0, weight=None):
+        super().__init__()
+        self.gamma = gamma
+        self.weight = weight
+
+    def forward(self, logits, target):
+        logp = torch.nn.functional.log_softmax(logits, dim=-1)
+        ce = torch.nn.functional.nll_loss(logp, target, weight=self.weight, reduction="none")
+        p = torch.exp(-ce)
+        return ((1 - p) ** self.gamma * ce).mean()
+
+
+def apply_head(model, args):
+    """依 --head_type 覆寫 model.head (linear 時不動, 保持原行為)。"""
+    if getattr(args, "head_type", "linear") != "mlp":
+        return model
+    head = getattr(model, "head", None)
+    in_features = getattr(head, "in_features", None) or getattr(model, "embed_dim", None)
+    if in_features is None:
+        print("[Recipe] 無法取得 head in_features, 保留原 head。")
+        return model
+    model.head = MLPHead(in_features, args.nb_classes,
+                         args.head_hidden_dims or [in_features // 2],
+                         dropout=args.head_dropout)
+    print(f"[Recipe] head=mlp hidden={args.head_hidden_dims} dropout={args.head_dropout}")
+    return model
+
+
+def _class_weights(args, device):
+    """從 train ImageFolder 類別數推 inverse-frequency 權重。"""
+    try:
+        ds = build_dataset(is_train="train", args=args)
+        targets = getattr(ds, "targets", None)
+        if targets is None:
+            return None
+        counts = np.bincount(np.asarray(targets), minlength=args.nb_classes).astype(float)
+        counts[counts == 0] = 1.0
+        w = counts.sum() / (len(counts) * counts)
+        return torch.tensor(w, dtype=torch.float32, device=device)
+    except Exception as e:
+        print(f"[Recipe] weighted loss 權重計算失敗 ({e}), 退回無權重。")
+        return None
+
+
+def build_criterion(args, device, default_criterion):
+    """依 --loss 建 criterion。cross_entropy 時回傳傳入的 default (與原版一致)。"""
+    loss = getattr(args, "loss", "cross_entropy")
+    if loss == "cross_entropy":
+        return default_criterion
+    weight = _class_weights(args, device)
+    if loss == "weighted_ce":
+        print(f"[Recipe] loss=weighted_ce (label_smoothing={args.smoothing})")
+        return torch.nn.CrossEntropyLoss(weight=weight, label_smoothing=args.smoothing)
+    if loss == "focal":
+        print(f"[Recipe] loss=focal gamma={args.focal_gamma}")
+        return FocalLoss(gamma=args.focal_gamma, weight=weight)
+    return default_criterion
+
+
 def main(args, criterion):
     # ---- Optionally load args from resume (when training)
     if args.resume and not args.eval:
         resume_path = args.resume
+        # 繼續訓練 (agent resume 策略): 先記下 CLI 指定的新 task/output_dir/延長量,
+        # 讓它們在 args 被 checkpoint 內的 args 取代後仍可覆寫回去
+        more_epochs = getattr(args, "more_epochs", 0)
+        new_task, new_output_dir = args.task, args.output_dir
         checkpoint = torch.load(args.resume, map_location="cpu")
         print(f"Load checkpoint (args) from: {args.resume}")
         args = checkpoint["args"]
         args.resume = resume_path
+        if more_epochs:
+            # 從 checkpoint 的 epoch 再多跑 more_epochs (misc.load_model 會設 start_epoch=ckpt+1)
+            args.epochs = int(checkpoint.get("epoch", args.epochs - 1)) + 1 + more_epochs
+            args.task = new_task
+            args.output_dir = new_output_dir
+            args.more_epochs = more_epochs
+            print(f"Continue training: +{more_epochs} epochs "
+                  f"(to epoch {args.epochs}), task={args.task}")
 
     # ---- Distributed setup
     misc.init_distributed_mode(args)
@@ -256,6 +381,9 @@ def main(args, criterion):
         if hasattr(model, "head") and hasattr(model.head, "weight"):
             trunc_normal_(model.head.weight, std=2e-5)
 
+    # ---- Recipe: 覆寫 head (--head_type mlp 時; linear 為 no-op)
+    model = apply_head(model, args)
+
     # ---- Datasets & samplers
     dataset_train = build_dataset(is_train="train", args=args)
     dataset_val   = build_dataset(is_train="val",   args=args)
@@ -303,31 +431,39 @@ def main(args, criterion):
         log_writer = None
 
     # ---- DataLoaders
+    # 效能旗標 (getattr 帶預設: resume 時 args 整包來自舊 checkpoint, 可能沒有新欄位)
+    loader_kw = {}
+    if args.num_workers > 0:
+        if bool(getattr(args, "persistent_workers", False)):
+            loader_kw["persistent_workers"] = True
+        pf = getattr(args, "prefetch_factor", None)
+        if pf is not None:
+            loader_kw["prefetch_factor"] = pf
     if not args.eval:
         data_loader_train = torch.utils.data.DataLoader(
             dataset_train, sampler=sampler_train,
             batch_size=args.batch_size, num_workers=args.num_workers,
-            pin_memory=args.pin_mem, drop_last=True,
+            pin_memory=args.pin_mem, drop_last=True, **loader_kw,
         )
         print(f"len of train_set: {len(data_loader_train) * args.batch_size}")
 
         data_loader_val = torch.utils.data.DataLoader(
             dataset_val, sampler=sampler_val,
             batch_size=args.batch_size, num_workers=args.num_workers,
-            pin_memory=args.pin_mem, drop_last=False,
+            pin_memory=args.pin_mem, drop_last=False, **loader_kw,
         )
 
         if os.path.exists(os.path.join(args.data_path, "final_val")):
             data_loader_final_val = torch.utils.data.DataLoader(
                 dataset_final_val, sampler=sampler_final_val,
                 batch_size=args.batch_size, num_workers=args.num_workers,
-                pin_memory=args.pin_mem, drop_last=False,
+                pin_memory=args.pin_mem, drop_last=False, **loader_kw,
             )
 
     data_loader_test = torch.utils.data.DataLoader(
         dataset_test, sampler=sampler_test,
         batch_size=args.batch_size, num_workers=args.num_workers,
-        pin_memory=args.pin_mem, drop_last=False,
+        pin_memory=args.pin_mem, drop_last=False, **loader_kw,
     )
 
     # ---- Mixup/CutMix
@@ -349,6 +485,10 @@ def main(args, criterion):
 
     model.to(device)
     model_without_ddp = model
+
+    # ---- Recipe: 依 --loss 建 criterion (cross_entropy 時沿用傳入值, 與原版一致)
+    if not args.eval:
+        criterion = build_criterion(args, device, criterion)
 
     # ---- Adaptation toggle
     if args.adaptation == "lp":

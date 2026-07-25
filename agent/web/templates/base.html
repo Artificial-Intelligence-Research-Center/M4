@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 反向代理相容: 算出 app 根目錄 (去掉本頁 route 段與結尾斜線) 當 <base>,
+     讓所有相對 URL 帶上代理前綴; 各端點都以結尾斜線請求, 避免 proxy 自動加斜線的壞掉 redirect。 -->
+<script>
+(function(){
+  var seg = "{{ route_seg|default('') }}";      // 本頁 route 段: '' / 'experiments' / 'presets' / 'jobs-page' / 'history'
+  var p = location.pathname;
+  if (p.length > 1 && p.charAt(p.length - 1) === '/') p = p.slice(0, -1);  // 去結尾斜線
+  if (seg && p.slice(-(seg.length + 1)) === '/' + seg) p = p.slice(0, p.length - seg.length - 1);
+  document.write('<base href="' + p + '/">');
+})();
+</script>
+<title>{% block title %}M4 自動微調 Agent{% endblock %}</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, "Noto Sans TC", sans-serif; margin: 0;
+         background: #f6f7f9; color: #1c1e21; }
+  header { background: #1f2a44; color: #fff; padding: 10px 22px; display: flex;
+           align-items: center; gap: 22px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 17px; }
+  nav { display: flex; gap: 4px; }
+  nav a { color: #cfd8ea; text-decoration: none; font-size: 14px; padding: 6px 12px;
+          border-radius: 7px; }
+  nav a:hover { background: rgba(255,255,255,.08); color: #fff; }
+  nav a.on { background: #2d6cdf; color: #fff; }
+  main { max-width: 1040px; margin: 16px auto; padding: 0 16px; }
+  /* 工作台 (wide): 不設寬度上限, 左右兩欄用滿整個螢幕 */
+  main.wide { max-width: none; margin: 16px 0; padding: 0 18px; }
+  .card { background: #fff; border: 1px solid #e3e6ea; border-radius: 10px;
+          padding: 16px 18px; margin-bottom: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  label { display: block; font-size: 13px; margin: 10px 0 4px; color: #444; }
+  input[type=text], select, textarea { width: 100%; padding: 8px 10px;
+          border: 1px solid #ccd0d6; border-radius: 7px; font-size: 14px; background:#fff;
+          color: inherit; font-family: inherit; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .row > div { flex: 1 1 200px; }
+  button { border: 0; border-radius: 7px; padding: 9px 16px; font-size: 14px;
+           cursor: pointer; margin-top: 12px; }
+  .primary { background: #2d6cdf; color: #fff; }
+  .ghost { background: #e9edf3; color: #1f2a44; }
+  .banner { padding: 9px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
+  .ok { background: #e7f6ec; color: #1a7f3c; border: 1px solid #b7e4c7; }
+  .warn { background: #fdf0e3; color: #9a5b12; border: 1px solid #f4d5a8; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eef0f3; }
+  pre { background: #0f1729; color: #d7e0f5; padding: 12px; border-radius: 8px;
+        overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .muted { color: #6b7280; font-size: 12px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; }
+  .pill.done, .pill.finished { background:#e7f6ec; color:#1a7f3c; }
+  .pill.failed, .pill.error { background:#fdeaea; color:#c0392b; }
+  .pill.running, .pill.queued, .pill.pending { background:#eaf1fd; color:#2d6cdf; }
+  .kv td:first-child { color:#6b7280; width: 170px; }
+  .bar { height: 16px; background: #e9edf3; border-radius: 999px; overflow: hidden; }
+  .bar > span { display:block; height:100%; background: linear-gradient(90deg,#2d6cdf,#4d8bff);
+                transition: width .4s ease; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+             gap: 8px; margin-top: 10px; }
+  .metrics .m { background:#f6f8fc; border:1px solid #e3e6ea; border-radius:8px; padding:7px 10px; }
+  .metrics .m b { display:block; font-size:16px; color:#1f2a44; }
+  .metrics .m span { font-size:11px; color:#6b7280; }
+  /* two-pane workspace */
+  /* 載入指示: 旋轉 spinner + 頂部不定進度條 */
+  .spin { display:inline-block; width:20px; height:20px; border:3px solid #cfe0fb;
+          border-top-color:#2d6cdf; border-radius:50%; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  /* QA streaming 打字游標 */
+  .qa-caret { animation:blink 1s steps(1) infinite; color:#2d6cdf; font-weight:700; }
+  @keyframes blink { 50% { opacity:0; } }
+  #loadbar { position:fixed; top:0; left:0; height:3px; width:0; z-index:1200; display:none;
+             background:linear-gradient(90deg,#2d6cdf,#7ab8ff); border-radius:0 2px 2px 0; }
+  #loadbar.on { display:block; animation:loadbar 1.1s ease-in-out infinite; }
+  @keyframes loadbar { 0%{left:0;width:0} 50%{left:15%;width:65%} 100%{left:100%;width:0} }
+  .split { display:flex; gap:10px; align-items:flex-start; }
+  .pane-left { flex: 0 0 420px; position: sticky; top: 12px; }
+  .pane-right { flex: 1 1 auto; min-width: 0; }
+  /* 左右分割線: 拖曳調整兩欄比例 (雙擊還原; 寬度記在 localStorage) */
+  .split-bar { flex:0 0 6px; align-self:stretch; cursor:col-resize; border-radius:3px;
+               background:#e3e6ea; position:sticky; top:12px; max-height:calc(100vh - 24px);
+               min-height:120px; transition:background .15s; }
+  .split-bar:hover, .split-bar.dragging { background:#94a3b8; }
+  @media (max-width: 900px){ .split{ flex-direction:column; } .pane-left{ flex-basis:auto; width:100%; position:static; }
+                             .split-bar{ display:none; } }
+  /* notebook cells */
+  .nb-cell { border:1px solid #e3e6ea; border-radius:10px; background:#fff; margin-bottom:14px; overflow:hidden; }
+  .nb-cell > .h { background:#f4f6f9; border-bottom:1px solid #e3e6ea; padding:7px 12px;
+                  font-size:12px; color:#3a4a6b; font-weight:600; display:flex; justify-content:space-between;
+                  align-items:center; gap:8px; }
+  .nb-cell > .b { padding:12px 14px; }
+  /* 每格標題列工具: 縮放層級 − / 100% / ＋ 與全螢幕 ⛶ */
+  .cell-tools { display:inline-flex; gap:3px; align-items:center; flex:0 0 auto; }
+  .cell-tools button { margin:0; padding:0 7px; font-size:12px; line-height:20px; height:22px;
+                       background:#e9edf3; color:#3a4a6b; border-radius:5px; font-weight:600; }
+  .cell-tools button:hover { background:#dde3ec; }
+  .cell-tools .zl { font-size:10px; color:#6b7280; min-width:34px; text-align:center; font-weight:400; }
+  /* 單格全螢幕 (nb-cell / 聊天 card / trial 對話框皆可; width 覆寫行內樣式) */
+  .cell-full { position:fixed !important; inset:0 !important; z-index:900; margin:0 !important;
+               border-radius:0 !important; overflow-y:auto; background:#fff;
+               max-height:none !important; height:auto !important;
+               width:auto !important; max-width:none !important; }
+  .cell-full > .b { padding:16px 22px; }
+  .cell-full #chat-box { height:calc(100vh - 230px) !important; }
+  /* chat */
+  #chat-box { display:flex; flex-direction:column; }
+</style>
+</head>
+<body>
+<div id="loadbar"></div>
+<header>
+  <h1>MedClaw</h1>
+  <nav>
+    <a href="./"            class="{{ 'on' if nav=='workspace' }}">工作台</a>
+    <a href="experiments/"  class="{{ 'on' if nav=='experiments' }}">新實驗</a>
+    <a href="presets/"      class="{{ 'on' if nav=='presets' }}">超參起點</a>
+    <a href="jobs-page/"    class="{{ 'on' if nav=='jobs' }}">背景工作</a>
+    <a href="history/"      class="{{ 'on' if nav=='history' }}">歷史 runs</a>
+  </nav>
+</header>
+<main class="{% block main_class %}{% endblock %}">
+{% block content %}{% endblock %}
+</main>
+<script>
+// ---- 共用小工具 ----
+function fmt(x){ return (x===null||x===undefined) ? '—' : Number(x).toFixed(4); }
+function esc(s){ return String(s).replace(/[&<>]/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m])); }
+const METRIC_LABELS = {accuracy:'Accuracy', f1:'F1', roc_auc:'ROC AUC', average_precision:'AP',
+  recall:'Recall', precision:'Precision', kappa:'Kappa', jaccard:'Jaccard', hamming:'Hamming', score:'Score'};
+const ENC_COLORS = ['#2d6cdf','#e8710a','#1a9e5c','#b5179e','#00838f','#c0392b','#7048e8'];
+function encColor(map, key){
+  if(!(key in map)) map[key] = ENC_COLORS[Object.keys(map).length % ENC_COLORS.length];
+  return map[key];
+}
+function svgLine(series){
+  const W=440,H=150,P=36, all=[];
+  series.forEach(s => (s.data||[]).forEach(v => { if(v!=null) all.push(v); }));
+  if(!all.length) return '<div class="muted">（尚無逐 epoch 曲線；訓練開始後出現）</div>';
+  const n = Math.max(...series.map(s => (s.data||[]).length));
+  let mn=Math.min(...all), mx=Math.max(...all); if(mn===mx) mx=mn+1;
+  const X=i => P + (n<=1?0:i/(n-1))*(W-P-8);
+  const Y=v => H-P - (v-mn)/(mx-mn)*(H-P-10);
+  const active = series.filter(s=>(s.data||[]).some(v=>v!=null));
+  const meta = {W,H,P,n,mn,mx,series: active.map(s=>({name:s.name,color:s.color,data:s.data||[]}))};
+  let g=`<svg class="linechart" viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px" `
+      +`data-chart="${encodeURIComponent(JSON.stringify(meta))}">`;
+  g+=`<line x1="${P}" y1="${H-P}" x2="${W-4}" y2="${H-P}" stroke="#ccd0d6"/>`;
+  g+=`<line x1="${P}" y1="8" x2="${P}" y2="${H-P}" stroke="#ccd0d6"/>`;
+  g+=`<text x="3" y="14" font-size="9" fill="#6b7280">${mx.toFixed(3)}</text>`;
+  g+=`<text x="3" y="${H-P}" font-size="9" fill="#6b7280">${mn.toFixed(3)}</text>`;
+  g+=`<text x="${W-4}" y="${H-6}" font-size="9" fill="#6b7280" text-anchor="end">epoch ${n-1}</text>`;
+  active.forEach((s,k)=>{
+    const pts=(s.data||[]).map((v,i)=> v==null?null:`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).filter(Boolean).join(' ');
+    if(pts) g+=`<polyline class="ln" data-s="${k}" points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.7"/>`;
+  });
+  // 最佳點標記 (series 帶 best:'min'|'max' 時): 空心圈 + 虛線垂線 + 數值@epoch 標籤
+  active.forEach(s=>{
+    if(!s.best) return;
+    let bi=-1, bv=null;
+    (s.data||[]).forEach((v,i)=>{ if(v==null) return;
+      if(bv==null || (s.best==='min' ? v<bv : v>bv)){ bv=v; bi=i; } });
+    if(bi<0) return;
+    const bx=X(bi), by=Y(bv);
+    g+=`<line x1="${bx.toFixed(1)}" y1="${by.toFixed(1)}" x2="${bx.toFixed(1)}" y2="${H-P}" stroke="${s.color}" stroke-dasharray="2 3" stroke-width="1" opacity="0.7"/>`;
+    g+=`<circle cx="${bx.toFixed(1)}" cy="${by.toFixed(1)}" r="4.5" fill="#fff" stroke="${s.color}" stroke-width="2"/>`;
+    const lbl=`${s.best==='min'?'▼ min':'▲ best'} ${(+bv).toFixed(3)} @${bi}`;
+    const tx=Math.min(Math.max(bx, P+34), W-52);
+    const ty=(by<26)? by+16 : by-8;   // 太靠上緣就標到點下方
+    // 雙層文字: 白描邊 + 填色, 疊在曲線上仍可讀
+    g+=`<text x="${tx.toFixed(1)}" y="${ty.toFixed(1)}" font-size="9.5" font-weight="700" text-anchor="middle" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round">${lbl}</text>`
+      +`<text x="${tx.toFixed(1)}" y="${ty.toFixed(1)}" font-size="9.5" font-weight="700" text-anchor="middle" fill="${s.color}">${lbl}</text>`;
+  });
+  // 十字游標 (hover 時顯示; pointer-events:none 讓事件穿透到下方 capture rect)
+  g+='<g class="xh" style="display:none;pointer-events:none">';
+  g+=`<line class="xh-v" y1="8" y2="${H-P}" stroke="#94a3b8" stroke-dasharray="3 3"/>`;
+  g+=`<line class="xh-h" x1="${P}" x2="${W-4}" stroke="#94a3b8" stroke-dasharray="3 3"/>`;
+  active.forEach(s=>{ g+=`<circle class="xh-d" r="3.2" fill="${s.color}" stroke="#fff" stroke-width="1"/>`; });
+  g+='</g>';
+  g+=`<rect class="xh-cap" x="${P}" y="8" width="${W-P-4}" height="${H-P-8}" fill="transparent" style="cursor:crosshair"/>`;
+  g+='</svg>';
+  let lg = active.map((s,k)=>`<span class="lg-s" data-s="${k}" style="border-radius:4px;padding:0 3px">`
+    +`<span style="color:${s.color}">■</span> ${s.name}</span>`).join(' &nbsp; ');
+  if(active.some(s=>s.best)) lg+=' &nbsp; <span class="muted">◎ 空心圈=最佳點（▲最大/▼最小 @epoch）</span>';
+  return '<div class="chartwrap">' + g
+    + '<div class="xh-tip muted" style="font-size:11px;min-height:15px;margin-top:1px">移到圖上看各點數值</div>'
+    + `<div style="font-size:11px;margin-top:-2px">${lg}</div></div>`;
+}
+function svgBars(items){
+  if(!items.length) return '<div class="muted">（尚無已完成 trial）</div>';
+  const W=480, bh=24, P=210, mx=Math.max(...items.map(i=>i.value), 0.0001), H=items.length*bh+8;
+  // 最佳 trial (最大值; 同分取先出現者) → 深色外框 + ★ 標記
+  const bi=items.reduce((b,it,i)=> it.value>items[b].value ? i : b, 0);
+  let g=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px">`;
+  items.forEach((it,i)=>{
+    const y=i*bh+4, w=Math.max((it.value/mx)*(W-P-46),1), best=(i===bi);
+    g+=`<text x="0" y="${y+15}" font-size="10" fill="#444" ${best?'font-weight="700"':''}>${esc(it.label)}</text>`;
+    g+=`<rect x="${P}" y="${y+2}" width="${w.toFixed(1)}" height="16" rx="3" fill="${it.color}"`
+      +(best?' stroke="#1f2a44" stroke-width="1.8"':'')+'/>';
+    g+=`<text x="${(P+w+4).toFixed(1)}" y="${y+15}" font-size="10" fill="#1f2a44" ${best?'font-weight="700"':''}>${it.value.toFixed(4)}${best?' ★':''}</text>`;
+  });
+  return g + '</svg>';
+}
+// ---- 每格標題列工具: 縮放層級 + 單格全螢幕 -------------------------------
+// 狀態存在 map (key=cell data-key / card data-key), 不放進生成 HTML →
+// notebook 輪詢重繪 (reconcile) 後由 applyCellUI() 重新套用, 不會被洗掉。
+const _cellUI = {};
+function cellToolsHTML(){
+  return '<span class="cell-tools">'
+    +'<button type="button" data-act="zout" title="縮小內容">−</button>'
+    +'<span class="zl">100%</span>'
+    +'<button type="button" data-act="zin" title="放大內容">＋</button>'
+    +'<button type="button" data-act="full" class="fs" title="全螢幕 / 還原 (Esc)">⛶</button>'
+    +'</span>';
+}
+function _cellState(key){ return _cellUI[key] || (_cellUI[key]={zoom:1, full:false}); }
+function _zoomTarget(host){ return host.querySelector(':scope > .b') || host.querySelector('[data-zoom-target]'); }
+function _syncCellUI(host, key){
+  const st=_cellState(key), t=_zoomTarget(host);
+  if(t) t.style.zoom=st.zoom;
+  host.classList.toggle('cell-full', !!st.full);
+  const zl=host.querySelector('.cell-tools .zl'); if(zl) zl.textContent=Math.round(st.zoom*100)+'%';
+  const fs=host.querySelector('.cell-tools .fs'); if(fs) fs.textContent=st.full?'🗗':'⛶';
+}
+function applyCellUI(container){
+  container.querySelectorAll('.nb-cell').forEach(el=>{
+    const key=el.getAttribute('data-key');
+    if(key && _cellUI[key]) _syncCellUI(el, key);
+  });
+}
+function exitAllFullscreen(){
+  let had=false;
+  Object.keys(_cellUI).forEach(k=>{ if(_cellUI[k].full){ _cellUI[k].full=false; had=true; } });
+  document.querySelectorAll('.cell-full').forEach(el=>{
+    el.classList.remove('cell-full');
+    const fs=el.querySelector('.cell-tools .fs'); if(fs) fs.textContent='⛶';
+  });
+  return had;
+}
+document.addEventListener('click', function(e){
+  const b=e.target.closest && e.target.closest('.cell-tools button'); if(!b) return;
+  const host=b.closest('.nb-cell') || b.closest('[data-key]'); if(!host) return;
+  const key=host.getAttribute('data-key'); if(!key) return;
+  const st=_cellState(key), act=b.getAttribute('data-act');
+  if(act==='full'){
+    const on=!st.full;
+    if(on) exitAllFullscreen();       // 一次只有一格全螢幕
+    st.full=on;
+  } else {
+    const d=(act==='zin'?0.1:-0.1);
+    st.zoom=Math.min(2.5, Math.max(0.5, Math.round((st.zoom+d)*10)/10));
+  }
+  _syncCellUI(host, key);
+});
+// ---- 折線圖十字游標 (顯示 X=epoch, Y=各系列數值) ----
+document.addEventListener('mousemove', function(e){
+  const cap = e.target;
+  if(!cap || !cap.classList || !cap.classList.contains('xh-cap')) return;
+  const svg = cap.ownerSVGElement; if(!svg) return;
+  let meta; try{ meta=JSON.parse(decodeURIComponent(svg.getAttribute('data-chart'))); }catch(_){ return; }
+  const W=meta.W,H=meta.H,P=meta.P,n=meta.n,mn=meta.mn,mx=meta.mx,series=meta.series;
+  const rect=svg.getBoundingClientRect();
+  const sx=(e.clientX-rect.left)/rect.width*W, sy=(e.clientY-rect.top)/rect.height*H;
+  let i=Math.round(((W-P-8)<=0?0:(sx-P)/(W-P-8))*(n-1)); i=Math.max(0,Math.min(n-1,i));
+  const X=P+(n<=1?0:i/(n-1))*(W-P-8);
+  const Yv=v=> H-P-(v-mn)/(mx-mn)*(H-P-10);
+  const g=svg.querySelector('.xh'); g.style.display='';
+  const v=g.querySelector('.xh-v'); v.setAttribute('x1',X); v.setAttribute('x2',X);
+  const h=g.querySelector('.xh-h'); h.setAttribute('y1',sy.toFixed(1)); h.setAttribute('y2',sy.toFixed(1));
+  const dots=g.querySelectorAll('.xh-d');
+  series.forEach((s,k)=>{
+    const val=s.data[i], d=dots[k];
+    if(val==null){ if(d) d.style.display='none'; }
+    else if(d){ d.style.display=''; d.setAttribute('cx',X); d.setAttribute('cy',Yv(val).toFixed(1)); }
+  });
+  // 最近曲線偵測: 游標與各系列在 epoch i 的點之垂直距離 < 15 (viewBox 座標) → 高亮
+  let hotK=-1, hotD=15;
+  series.forEach((s,k)=>{ const val=s.data[i]; if(val==null) return;
+    const dd=Math.abs(Yv(val)-sy); if(dd<hotD){ hotD=dd; hotK=k; } });
+  const wrap=svg.closest('.chartwrap');
+  _chartHot(svg, wrap, hotK);
+  const tip=wrap&&wrap.querySelector('.xh-tip');
+  if(tip){
+    const parts=['epoch '+i].concat(series.map((s,k)=>{
+      const val=s.data[i]; if(val==null) return null;
+      const txt=s.name+'='+(+val).toFixed(4);
+      return k===hotK?('<b style="background:#fff3bf;border-radius:3px;padding:0 2px;color:#1f2a44">'+txt+'</b>'):txt;
+    }).filter(Boolean));
+    tip.innerHTML=parts.join('  ·  ');
+  }
+});
+// 套用/重設「最近曲線」高亮: 曲線加粗、其餘變淡; 下方圖例文字同步高亮
+function _chartHot(svg, wrap, hotK){
+  svg.querySelectorAll('polyline.ln').forEach(pl=>{
+    const k=+pl.getAttribute('data-s');
+    if(hotK<0){ pl.setAttribute('stroke-width','1.7'); pl.style.opacity=''; }
+    else if(k===hotK){ pl.setAttribute('stroke-width','3'); pl.style.opacity='1'; }
+    else { pl.setAttribute('stroke-width','1.7'); pl.style.opacity='0.25'; }
+  });
+  if(!wrap) return;
+  wrap.querySelectorAll('.lg-s').forEach(el=>{
+    const k=+el.getAttribute('data-s');
+    if(hotK>=0 && k===hotK){ el.style.opacity='1'; el.style.fontWeight='700'; el.style.background='#fff3bf'; }
+    else if(hotK>=0){ el.style.opacity='0.4'; el.style.fontWeight=''; el.style.background=''; }
+    else { el.style.opacity=''; el.style.fontWeight=''; el.style.background=''; }
+  });
+}
+document.addEventListener('mouseout', function(e){
+  const cap=e.target;
+  if(!cap || !cap.classList || !cap.classList.contains('xh-cap')) return;
+  const svg=cap.ownerSVGElement; if(!svg) return;
+  const g=svg.querySelector('.xh'); if(g) g.style.display='none';
+  const wrap=svg.closest('.chartwrap'), tip=wrap&&wrap.querySelector('.xh-tip');
+  _chartHot(svg, wrap, -1);   // 離開圖表 → 還原所有曲線與圖例
+  if(tip) tip.textContent='移到圖上看各點數值';
+});
+</script>
+{% block script %}{% endblock %}
+</body>
+</html>

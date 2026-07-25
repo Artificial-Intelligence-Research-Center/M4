@@ -10,9 +10,9 @@ TEST_FOLDERS = [
     "baseline_models",
     # "gastro_dinov3"
     # "our_dinov3"
-    "gastroscopy_baseline",
+    # "gastroscopy_baseline",
     # "our_pixio_dis"
-    "dinov2_base",
+    # "dinov2_base",
     # "dinov3_cs"
     # "dinov3_0414"
     # "sft_default_param",
@@ -36,11 +36,11 @@ TEST_DATASETS = [
     # "APTOS2019",
     # "MESSIDOR2",
     # "IDRiD_data",
-    # "Glaucoma_fundus",
-    # "PAPILA",
+    "Glaucoma_fundus",
+    "PAPILA",
     # "Retina",
     # "MIL",
-    "SL",
+    # "SL",
     # "HK",
 ]
 
@@ -127,7 +127,7 @@ if __name__ == "__main__":
     # output_dir = "test"
     # output_dir = "redo_SFT_finetune_0601"
     # output_dir = "dinov2_vitb14_gastronet_0609"
-    output_dir = "gastroscopy_baseline_finetune_0612"
+    output_dir = "fundus_baseline_finetune"
 
     # 0. 先收集所有模型檔案
     test_models = []
