@@ -22,12 +22,14 @@ import re
 import time
 from typing import Optional
 
-from . import (conversation, dataset_analyzer, evaluator as ev, log_curves,
-               metric_registry as mreg, presets, report as report_mod)
+from . import (conversation, dataset_analyzer, encoder_registry as reg,
+               evaluator as ev, log_curves, metric_registry as mreg, presets,
+               report as report_mod)
 from .config import AgentConfig
 from .journal import Journal, Node
 from .ledger import Ledger
-from .schemas import DatasetProfile, EvalConfig, Recipe, TrialResult
+from .schemas import (DatasetProfile, EncoderChoice, EvalConfig, Recipe,
+                      TrialResult)
 from .trainer import run_trial
 
 
@@ -216,6 +218,131 @@ class LoopController:
             return None, 1.0
         return self._select_improve_node(journal)
 
+    def _resume_ready(self, node: Node) -> bool:
+        """這個節點現在允許 resume 嗎 (只看護欄, 不擲骰子)。"""
+        return self._maybe_resume(node, force=True) is not None
+
+    def _debuggable(self, node: Node) -> bool:
+        return (node.is_buggy and node.is_leaf and not node.debug_exhausted
+                and node.debug_depth <= self.cfg.loop.max_debug_depth)
+
+    def _tree_view(self, journal: Journal) -> list[dict]:
+        """把解答樹整理成可讀清單給決策層; allowed = 該節點現在允許的階段。"""
+        out = []
+        for n in journal.nodes:
+            if not n.evaluated:
+                continue
+            allowed = []
+            if n.metric is not None:
+                allowed.append("improve")
+                if self._resume_ready(n):
+                    allowed.append("resume")
+            if self._debuggable(n):
+                allowed.append("debug")
+            prov = n.recipe.provenance or {}
+            out.append({
+                "trial_id": n.id,
+                "stage": n.stage,
+                "parent": n.parent.id if n.parent is not None else None,
+                "encoder": n.recipe.encoder.model_key,
+                "adaptation": n.recipe.encoder.adaptation,
+                "status": n.trial.status,
+                "primary_score": n.metric,
+                "epochs": n.recipe.hparams.epochs,
+                "mutation": prov.get("mutation"),
+                "is_leaf": n.is_leaf,
+                "allowed": allowed,
+            })
+        return out
+
+    def _apply_search_override(self, journal: Journal, profile: DatasetProfile,
+                               parent: Optional[Node], prob: float, k: int,
+                               ) -> tuple[Optional[Node], float, Optional[str], dict]:
+        """policy 選完 → 交給決策層過目, 讓討論/QA 結論真的能改變選到哪個節點。
+
+        回傳 (parent, prob, forced_stage, draft_pref);
+        forced_stage=None 表示沿用 policy (階段仍由節點狀態推導)。
+        決策層的選擇會在這裡驗證, 不合法就沿用 policy 並把原因說給使用者聽。
+        """
+        if not self.cfg.loop.select_override:
+            return parent, prob, None, {}
+        # policy 這輪的提案 (與下方分支的推導規則一致)
+        if parent is None:
+            prop_stage = "draft"
+        elif parent.is_buggy:
+            prop_stage = "debug"
+        else:
+            prop_stage = "improve"   # resume 之後才擲骰; 對決策層一律呈現為 improve
+        proposal = {"stage": prop_stage,
+                    "parent_id": parent.id if parent is not None else None,
+                    "select_prob": round(prob, 4),
+                    "note": ("draft 名額未滿" if prop_stage == "draft" and
+                             len(journal.draft_nodes) < self.cfg.loop.num_drafts
+                             else "依指標 softmax 抽樣" if prop_stage == "improve"
+                             else "debug_prob 抽中")}
+        tree = self._tree_view(journal)
+        try:
+            ov = self.advisor.review_search_choice(
+                profile, tree, proposal, conversation.read(self.run_dir))
+        except Exception as e:                       # noqa: BLE001
+            self._say("system", f"決策層檢視節點選擇失敗（{e}），沿用 policy 的選擇。",
+                      kind="status", round=k)
+            return parent, prob, None, {}
+        if not ov or not ov.override:
+            if ov is not None and (ov.reason or "").strip():
+                self._say("llm", f"維持 policy 的選擇：{ov.reason.strip()}",
+                          kind="decision", round=k)
+            return parent, prob, None, {}
+
+        # ---- 驗證: 不合法就沿用 policy ----------------------------------
+        def _reject(why: str):
+            self._say("system", f"決策層想改選（{ov.stage}"
+                      f"{'/' + ov.parent_id if ov.parent_id else ''}），"
+                      f"但{why}，沿用 policy 的選擇。", kind="status", round=k)
+            return parent, prob, None, {}
+
+        if ov.stage == "draft":
+            pref = {}
+            if ov.encoder:
+                try:
+                    card = reg.get(ov.encoder)
+                except KeyError:
+                    card = None
+                if card is None or not card.available:
+                    return _reject(f"指定的 encoder {ov.encoder} 不在可用目錄中（或權重未取得）")
+                pref["encoder"] = EncoderChoice(
+                    model_key=ov.encoder,
+                    adaptation=ov.adaptation or "finetune",
+                    rationale=ov.reason)
+            if ov.preset:
+                if ov.preset not in presets.names():
+                    return _reject(f"指定的 preset {ov.preset} 不存在")
+                pref["preset"] = ov.preset
+            self._say("llm", f"改選：開一條新 draft"
+                      + (f"（encoder={ov.encoder}"
+                         + (f"/{ov.adaptation}" if ov.adaptation else "")
+                         + (f", preset={ov.preset}" if ov.preset else "") + "）"
+                         if pref else "")
+                      + f" — {ov.reason}", kind="decision", round=k)
+            return None, 1.0, "draft", pref
+
+        target = next((n for n in journal.nodes
+                       if n.id and n.id == ov.parent_id), None)
+        if target is None:
+            return _reject(f"找不到節點 {ov.parent_id}")
+        if ov.stage == "improve" and target.metric is None:
+            return _reject("該節點沒有成功的分數，無法作為改良基準")
+        if ov.stage == "debug" and not self._debuggable(target):
+            return _reject("該節點不是可除錯的失敗葉節點（或除錯鏈已達上限）")
+        if ov.stage == "resume" and not self._resume_ready(target):
+            return _reject("該節點不符合續訓條件（已收斂／已有續訓分支／無 checkpoint）")
+
+        self._say("llm", f"改選：從節點 {target.id} 做 {ov.stage}"
+                  f"（policy 原本選 {proposal['stage']}"
+                  f"{'/' + proposal['parent_id'] if proposal['parent_id'] else ''}）"
+                  f" — {ov.reason}", kind="decision", round=k)
+        return target, 1.0, ov.stage, {}
+
     def _draft_choice(self, journal: Journal, choices) -> tuple:
         """第 n 個 draft 的 (encoder, preset): 先輪流各 encoder (多樣性),
         同一 encoder 再次 draft 時換下一組超參 preset。"""
@@ -244,7 +371,7 @@ class LoopController:
             profile, encoder, node.trial, tail,
             workspace_dir=os.path.join(self.run_dir, "src"))
 
-    def _maybe_resume(self, node: Node) -> Optional[Recipe]:
+    def _maybe_resume(self, node: Node, force: bool = False) -> Optional[Recipe]:
         """繼續訓練策略: 節點訓練完但 curve 未收斂 → 從其 checkpoint 續訓
         resume_epochs 個 epoch (新 trial 節點, stage=resume)。不適用回 None。
 
@@ -252,7 +379,10 @@ class LoopController:
           - 已有 resume child 的節點不再續訓 (重複續訓 = 完全相同的計算);
           - resume 節點自己沒賺 (≤ parent + min_delta) 不再往下追;
           - 符合條件也只以 resume_prob 機率選擇, 讓 improve 有機會;
-          - 全 run 連續 max_failed_resumes 次 resume 無提升 → 停用 (self._resume_disabled)。"""
+          - 全 run 連續 max_failed_resumes 次 resume 無提升 → 停用 (self._resume_disabled)。
+
+        force=True (決策層明確指定 resume): 只跳過「機率性選擇」那一關, 其餘護欄照舊
+        — 那些是正確性/重複計算的限制, 不是探索與否的取捨。"""
         scfg = self.cfg.loop
         if not scfg.resume_unconverged or scfg.resume_epochs <= 0:
             return None
@@ -273,7 +403,7 @@ class LoopController:
         unc, why = log_curves.unconverged(t.epoch_curve or {})
         if not unc:
             return None
-        if random.random() >= scfg.resume_prob:
+        if not force and random.random() >= scfg.resume_prob:
             return None  # 機率性選擇: 其餘機率落到 improve, 避免 resume 壟斷
 
         r = t.recipe.model_copy(deep=True)
@@ -429,12 +559,27 @@ class LoopController:
             k = len(history)
             # ---- policy: 決定這一輪長在哪個節點下 ------------------------
             parent, prob = self._search_policy(journal)
-            if parent is None:
+            # 決策層 override: policy 是規則+抽樣, 看不懂討論/QA 結論 —
+            # 選完後交給 Advisor 過目, 讓它有改選節點/階段的機會 (會驗證合法性)。
+            forced, draft_pref = None, {}
+            if any(n.evaluated for n in journal.nodes):   # 樹上有結果才有得選
+                parent, prob, forced, draft_pref = self._apply_search_override(
+                    journal, profile, parent, prob, k)
+            # resume 判定要在分支前算好 (forced 時跳過機率關卡, 其餘護欄照舊)
+            resumed = None
+            if (parent is not None and not parent.is_buggy
+                    and forced in (None, "resume")):
+                resumed = self._maybe_resume(parent, force=(forced == "resume"))
+
+            if forced == "draft" or (forced is None and parent is None):
                 stage = "draft"
                 encoder, preset = self._draft_choice(journal, choices)
+                encoder = draft_pref.get("encoder") or encoder
+                preset = draft_pref.get("preset") or preset
+                which = ("額外起點（決策層指定）" if forced == "draft" else
+                         f"draft {len(journal.draft_nodes) + 1}/{self.cfg.loop.num_drafts}")
                 self._say("system",
-                          f"第 {k} 輪（draft）：開新起點 draft "
-                          f"{len(journal.draft_nodes) + 1}/{self.cfg.loop.num_drafts} — "
+                          f"第 {k} 輪（draft）：開新起點 {which} — "
                           f"encoder={encoder.model_key}（{encoder.adaptation}）, "
                           f"preset={preset}（{self.cfg.advisor.type} 決策中，請稍候…）",
                           kind="status", round=k)
@@ -444,11 +589,12 @@ class LoopController:
                           f"loss={recipe.losses[0].name if recipe.losses else '-'}。"
                           + (f" {recipe.encoder.rationale}" if recipe.encoder.rationale else ""),
                           kind="decision", round=k)
-            elif parent.is_buggy:
+            elif forced == "debug" or (forced is None and parent.is_buggy):
                 stage = "debug"
                 encoder = parent.recipe.encoder
-                self._say("system", f"第 {k} 輪（debug）：從失敗節點 {parent.id} "
-                          f"開始除錯（debug_prob 抽中）。", kind="status", round=k)
+                self._say("system", f"第 {k} 輪（debug）：從失敗節點 {parent.id} 開始除錯"
+                          f"（{'決策層指定' if forced == 'debug' else 'debug_prob 抽中'}）。",
+                          kind="status", round=k)
                 recipe = self._debug_recipe(profile, encoder, parent)
                 if recipe is None:
                     parent.debug_exhausted = True
@@ -458,14 +604,15 @@ class LoopController:
                 self._say("llm", f"除錯 {parent.id}："
                           f"{recipe.provenance.get('mutation', '')}",
                           kind="decision", round=k)
-            elif (resumed := self._maybe_resume(parent)) is not None:
+            elif resumed is not None:
                 # 繼續訓練策略: 選中節點 curve 未收斂 → 先從其 checkpoint 續訓, 不變異
                 stage = "resume"
                 encoder = parent.recipe.encoder
                 self._say("system",
                           f"第 {k} 輪（resume）：從節點 {parent.id}"
-                          f"（score={parent.metric:.4f}，被選機率 {prob:.0%}）繼續訓練。",
-                          kind="status", round=k)
+                          f"（score={parent.metric:.4f}，"
+                          f"{'決策層指定' if forced == 'resume' else f'被選機率 {prob:.0%}'}）"
+                          f"繼續訓練。", kind="status", round=k)
                 recipe = resumed
                 self._say("llm", f"繼續訓練 {parent.id}："
                           f"{recipe.provenance.get('reason', '')}"
@@ -477,8 +624,8 @@ class LoopController:
                 self._say("system",
                           f"第 {k} 輪（improve）：本輪從節點 {parent.id}"
                           f"（encoder={encoder.model_key}, score={parent.metric:.4f}，"
-                          f"依指標抽樣機率 {prob:.0%}）開始改善；"
-                          f"{self.cfg.advisor.type} 決策中，請稍候…",
+                          f"{'決策層指定' if forced == 'improve' else f'依指標抽樣機率 {prob:.0%}'}）"
+                          f"開始改善；{self.cfg.advisor.type} 決策中，請稍候…",
                           kind="status", round=k)
                 discussion = conversation.read(self.run_dir)
                 # workspace_dir: 允許修改程式時 (allow_code_edit), improve 階段可
@@ -508,7 +655,9 @@ class LoopController:
             prov = dict(recipe.provenance)
             prov["search"] = {"stage": stage,
                               "parent": parent.id if parent is not None else None,
-                              "select_prob": round(prob, 4)}
+                              "select_prob": round(prob, 4),
+                              # 節點是 policy 抽的還是決策層改選的 (前端會標示)
+                              "overridden": forced is not None}
             if cache_n and stage != "resume":
                 prov["cache_resized"] = cache_n
             recipe.provenance = prov

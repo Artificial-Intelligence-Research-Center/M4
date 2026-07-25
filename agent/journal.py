@@ -138,6 +138,8 @@ class Journal:
                 "debug_depth": n.debug_depth,
                 "resume_depth": n.resume_depth,
                 "select_prob": n.recipe.provenance.get("search", {}).get("select_prob"),
+                # 這個節點是 policy 抽中的, 還是決策層改選的
+                "overridden": n.recipe.provenance.get("search", {}).get("overridden", False),
                 "mutation": n.recipe.provenance.get("mutation"),
             } for i, n in enumerate(self.nodes)],
         }

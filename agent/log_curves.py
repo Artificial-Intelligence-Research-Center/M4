@@ -9,15 +9,59 @@ from __future__ import annotations
 import os
 import re
 
-_METRIC_RE = re.compile(
-    r"Accuracy:\s*([\d.]+),\s*F1 Score:\s*([\d.]+),\s*ROC AUC:\s*([\d.]+),\s*"
-    r"Hamming Loss:\s*([\d.]+),\s*Jaccard Score:\s*([\d.]+),\s*Precision:\s*([\d.]+),\s*"
-    r"Recall:\s*([\d.]+),\s*Average Precision:\s*([\d.]+),\s*Kappa:\s*([\d.]+),\s*"
-    r"Score:\s*([\d.]+)", re.S)
+METRIC_KEYS = ["accuracy", "f1", "roc_auc", "hamming", "jaccard",
+               "precision", "recall", "average_precision", "kappa", "score"]
+# 數值一律允許負號: kappa 低於隨機水準時為負 (score = (f1+roc_auc+kappa)/3 也跟著變負)。
+# 少了 `-?` 整個區塊匹配失敗 → 該 epoch 從 val_score 中消失, 之後每個點的 epoch 位置左移。
+_NUM = r"(-?[\d.]+)"
+METRIC_RE = re.compile(
+    rf"Accuracy:\s*{_NUM},\s*F1 Score:\s*{_NUM},\s*ROC AUC:\s*{_NUM},\s*"
+    rf"Hamming Loss:\s*{_NUM},\s*Jaccard Score:\s*{_NUM},\s*Precision:\s*{_NUM},\s*"
+    rf"Recall:\s*{_NUM},\s*Average Precision:\s*{_NUM},\s*Kappa:\s*{_NUM},\s*"
+    rf"Score:\s*{_NUM}", re.S)
+
+# 訓練跑完後, main_finetune 會用「val 最佳 checkpoint」再跑一次 final_val/test
+# (main_finetune.py「Final Test (Best Ckpt)」)。那段輸出與逐 epoch 的 val 區塊完全同格式
+# (連 "val loss:" 字樣都一樣) → 抽逐 epoch 曲線前必須先切掉, 否則曲線末端會多出一個
+# 其實是 test 的「epoch」: val_loss 憑空跳升、val_score 憑空掉一截。
+_FINAL_EVAL_RE = re.compile(
+    r"^[^\n]*(?:Val test|Test) with the best model[^\n]*$", re.M)
+
+
+def split_final_eval(text: str) -> tuple[str, list[dict]]:
+    """拆成 (逐 epoch 訓練文字, 最終評估區塊清單)。
+
+    每個最終評估區塊 = 標記行 → 其後第一個指標區塊結束, 解析成
+    {mode: "val"|"test", metrics: {...}, loss: float}。
+    """
+    kept: list[str] = []
+    finals: list[dict] = []
+    pos = 0
+    for m in _FINAL_EVAL_RE.finditer(text):
+        if m.start() < pos:            # 已被前一個區塊涵蓋
+            continue
+        kept.append(text[pos:m.start()])
+        mm = METRIC_RE.search(text, m.end())
+        stop = mm.end() if mm else len(text)
+        block = text[m.start():stop]
+        d = {"mode": "val" if "Val test" in m.group(0) else "test"}
+        if mm:
+            d["metrics"] = dict(zip(METRIC_KEYS,
+                                    [float(x) for x in mm.groups()]))
+        if lm := re.search(r"val loss:\s*([\d.]+)", block):
+            d["loss"] = float(lm.group(1))
+        finals.append(d)
+        pos = stop
+    kept.append(text[pos:])
+    return "".join(kept), finals
 
 
 def parse(log_path: str) -> dict:
-    """回傳 {train_loss:[...], val_loss:[...], val_score:[...]} (逐 epoch)。"""
+    """回傳 {train_loss, val_loss, val_score} (逐 epoch) + final_test (最終評估)。
+
+    三條曲線只含「逐 epoch 的 val」, 長度一致 (= 實際跑完的 epoch 數);
+    最佳 checkpoint 的最終 test 成績另外放在 final_test, 不混進曲線。
+    """
     if not log_path or not os.path.isfile(log_path):
         return {}
     try:
@@ -25,11 +69,14 @@ def parse(log_path: str) -> dict:
             text = f.read()
     except OSError:
         return {}
+    text, finals = split_final_eval(text)
     train_loss = [round(float(x), 5) for x in re.findall(
         r"Averaged stats:.*?loss:\s*[\d.]+\s*\(([\d.]+)\)", text)]
     val_loss = [round(float(x), 5) for x in re.findall(r"val loss:\s*([\d.]+)", text)]
-    val_score = [round(float(m.groups()[-1]), 5) for m in _METRIC_RE.finditer(text)]
-    return {"train_loss": train_loss, "val_loss": val_loss, "val_score": val_score}
+    val_score = [round(float(m.groups()[-1]), 5) for m in METRIC_RE.finditer(text)]
+    final_test = next((f for f in reversed(finals) if f["mode"] == "test"), None)
+    return {"train_loss": train_loss, "val_loss": val_loss,
+            "val_score": val_score, "final_test": final_test}
 
 
 _ITER_TIME_RE = re.compile(r"time:\s*([\d.]+)\s+data:\s*([\d.]+)")

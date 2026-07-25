@@ -12,7 +12,7 @@ from . import encoder_registry as reg
 from . import presets
 from .schemas import (
     DatasetProfile, EncoderChoice, HeadSpec, HyperParams, Recipe, TrialResult,
-    NextAction, ComponentRef,
+    NextAction, ComponentRef, SearchOverride,
 )
 
 # 超參起點 (default / paper / mae + 使用者自訂) 現由 presets 模組管理, 可於 web 編輯。
@@ -39,6 +39,11 @@ class Advisor(Protocol):
     def propose_debug(self, profile: DatasetProfile, encoder: EncoderChoice,
                       trial: TrialResult, log_tail: str,
                       workspace_dir: Optional[str] = None) -> Optional[Recipe]: ...
+    # 樹搜尋節點選擇的覆寫機會: policy 選完後把「整棵樹 + 這次的選擇」交給決策層過目,
+    # 讓討論/QA 結論能真的改變選到哪個節點 (預設維持 policy 的選擇)
+    def review_search_choice(self, profile: DatasetProfile, tree: list[dict],
+                             proposal: dict,
+                             discussion: list[dict]) -> SearchOverride: ...
     # 未來: 依資料提示不同下游任務起點供選擇 (§5.8)
     def suggest_task_templates(self, profile: DatasetProfile) -> list: ...
 
@@ -53,6 +58,12 @@ class HeuristicAdvisor:
     def suggest_task_templates(self, profile: DatasetProfile) -> list:
         from . import task_template
         return task_template.suggest(profile)
+
+    def review_search_choice(self, profile: DatasetProfile, tree: list[dict],
+                             proposal: dict,
+                             discussion: list[dict]) -> SearchOverride:
+        """規則式決策不介入節點選擇 — 一律沿用 policy 的結果。"""
+        return SearchOverride(override=False)
 
     def review_and_decide(self, profile: DatasetProfile, encoder: EncoderChoice,
                           history: list[TrialResult], discussion: list[dict],

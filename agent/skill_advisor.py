@@ -27,7 +27,8 @@ from typing import Optional
 
 from .advisor import HeuristicAdvisor
 from .schemas import (
-    DatasetProfile, EncoderChoice, NextAction, Recipe, TrialResult,
+    DatasetProfile, EncoderChoice, NextAction, Recipe, SearchOverride,
+    TrialResult,
 )
 
 _DEFAULT_HANDOFF = os.path.join(
@@ -167,6 +168,22 @@ class SkillAdvisor:
         return self.fallback.review_and_decide(profile, encoder, history,
                                                discussion, base=base,
                                                workspace_dir=workspace_dir)
+
+    def review_search_choice(self, profile: DatasetProfile, tree: list[dict],
+                             proposal: dict,
+                             discussion: list[dict]) -> SearchOverride:
+        req = self._write_request("review_search_choice", {
+            "profile": profile.model_dump(), "tree": tree,
+            "proposal": proposal, "discussion": discussion,
+        })
+        resp = self._invoke_skill(req)
+        if resp and "search_override" in resp:
+            try:
+                return SearchOverride.model_validate(resp["search_override"])
+            except Exception:
+                pass
+        return self.fallback.review_search_choice(profile, tree, proposal,
+                                                  discussion)
 
 
 def _sleep(s: float) -> None:  # 隔離以便測試時 monkeypatch

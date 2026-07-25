@@ -26,7 +26,8 @@ import traceback
 from flask import Flask, jsonify, redirect, render_template, request
 
 from .. import (auto_finetune, conversation as convo, dataset_analyzer,
-                encoder_registry as reg, presets as presets_mod)
+                dataset_ingest, dataset_registry as dsreg,
+                encoder_registry as reg, log_curves, presets as presets_mod)
 from ..advisor import HeuristicAdvisor
 from ..config import AgentConfig
 from ..ledger import Ledger
@@ -36,9 +37,12 @@ from ..trainer import gpu_allocatable
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _RUNS = os.path.join(_ROOT, "runs")
+_DATA = os.path.join(_ROOT, "data")
 _DEFAULT_DATA = os.path.join(_ROOT, "data", "5_fold_PAPILA", "PAPILA_seed42_fold0")
 
 app = Flask(__name__)
+# 上傳資料集: 單次請求上限 (壓縮檔)
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 ** 3
 # 反向代理相容: 關掉 Flask 對「結尾斜線不符」自動發的 301 (其 Location 為絕對路徑,
 # 在代理下會壞掉且被瀏覽器永久快取)。
 app.url_map.strict_slashes = False
@@ -91,38 +95,50 @@ def _run_names() -> list[str]:
     return sorted(names, reverse=True)
 
 
+def _dataset_ctx() -> dict:
+    """資料集選擇器要用的 context: 分組清單 + 預設選取路徑。"""
+    groups = dsreg.groups(_DATA)
+    flat = [d for g in groups for d in g["datasets"]]
+    default = os.path.abspath(_DEFAULT_DATA)
+    if not any(d["path"] == default for d in flat):
+        default = flat[0]["path"] if flat else _DEFAULT_DATA
+    return {"dataset_groups": groups, "default_data": default}
+
+
 def _latest_log(run_dir: str) -> str | None:
     logs = glob.glob(os.path.join(run_dir, "logs", "*.txt"))
     return max(logs, key=os.path.getmtime) if logs else None
 
 
-# val 指標區塊 (跨 3 行): "Accuracy: .., F1 Score: .., ..., Score: .."
-_METRIC_KEYS = ["accuracy", "f1", "roc_auc", "hamming", "jaccard",
-                "precision", "recall", "average_precision", "kappa", "score"]
-_METRIC_RE = re.compile(
-    r"Accuracy:\s*([\d.]+),\s*F1 Score:\s*([\d.]+),\s*ROC AUC:\s*([\d.]+),\s*"
-    r"Hamming Loss:\s*([\d.]+),\s*Jaccard Score:\s*([\d.]+),\s*Precision:\s*([\d.]+),\s*"
-    r"Recall:\s*([\d.]+),\s*Average Precision:\s*([\d.]+),\s*Kappa:\s*([\d.]+),\s*"
-    r"Score:\s*([\d.]+)", re.S)
+# val 指標區塊 / 最終評估切割 — 與 agent/log_curves.py 共用同一份實作,
+# 避免兩邊 regex 各自演化 (曾因此讓 web 曲線與 advisor 看到的資料不一致)。
+_METRIC_KEYS = log_curves.METRIC_KEYS
+_METRIC_RE = log_curves.METRIC_RE
+_split_final_eval = log_curves.split_final_eval
 
 
 def _parse_progress(log_path: str) -> dict:
     with open(log_path, encoding="utf-8", errors="replace") as fh:
         text = fh.read()
+    # body = 只有逐 epoch 訓練的部分 (指標/loss 一律從這裡取, 否則跑完後
+    # 「最新 val 指標」會變成最終 test 的數字)
+    body, finals = _split_final_eval(text)
 
     total = int(m.group(1)) if (m := re.search(r"epochs=(\d+),", text)) else None
-    epochs_seen = [int(x) for x in re.findall(r"Epoch:\s*\[(\d+)\]", text)]
+    epochs_seen = [int(x) for x in re.findall(r"Epoch:\s*\[(\d+)\]", body)]
     cur_epoch = max(epochs_seen) if epochs_seen else None
 
     val = None
-    if mm := list(_METRIC_RE.finditer(text)):
+    if mm := list(_METRIC_RE.finditer(body)):
         vals = [float(x) for x in mm[-1].groups()]
         val = dict(zip(_METRIC_KEYS, vals))
     val_loss = float(m.group(1)) if (m := re.search(
-        r"val loss:\s*([\d.]+)(?!.*val loss:)", text, re.S)) else None
+        r"val loss:\s*([\d.]+)(?!.*val loss:)", body, re.S)) else None
     train_loss = None
-    if tl := re.findall(r"Averaged stats:.*?loss:\s*[\d.]+\s*\(([\d.]+)\)", text):
+    if tl := re.findall(r"Averaged stats:.*?loss:\s*[\d.]+\s*\(([\d.]+)\)", body):
         train_loss = float(tl[-1])
+    # 最終 test (用 val 最佳 checkpoint 重跑) — 與逐 epoch val 分開回報
+    final_test = next((f for f in reversed(finals) if f["mode"] == "test"), None)
 
     best_epoch = best_score = None
     if bm := re.findall(r"Best epoch =\s*(\d+),\s*Best score =\s*([\d.]+)", text):
@@ -151,6 +167,7 @@ def _parse_progress(log_path: str) -> dict:
     return {
         "total_epochs": total, "cur_epoch": cur_epoch,
         "train_loss": train_loss, "val_loss": val_loss, "val": val,
+        "final_test": final_test,
         "best_epoch": best_epoch, "best_score": best_score,
         "finished": finished, "crashed": crashed, "status": status,
         "train_time": tt.group(1) if tt else None,
@@ -166,6 +183,8 @@ def _parse_curves(log_path: str) -> dict:
             text = fh.read()
     except OSError:
         return {}
+    # 只取逐 epoch 的訓練部分; 最終 test 另外回報 (見 _split_final_eval)
+    text, finals = _split_final_eval(text)
     train_loss = [float(x) for x in re.findall(
         r"Averaged stats:.*?loss:\s*[\d.]+\s*\(([\d.]+)\)", text)]
     val_loss = [float(x) for x in re.findall(r"val loss:\s*([\d.]+)", text)]
@@ -181,6 +200,7 @@ def _parse_curves(log_path: str) -> dict:
         "train_loss": train_loss, "val_loss": val_loss,
         "val_score": val_score, "val_accuracy": val_acc,
         "val_roc_auc": val_auc, "val_f1": val_f1,
+        "final_test": next((f for f in reversed(finals) if f["mode"] == "test"), None),
     }
 
 
@@ -212,8 +232,8 @@ def index():
         nav="workspace", route_seg="",
         presets=presets_mod.names(),
         advisors=["llm", "heuristic", "skill"],   # llm 為預設 (下拉第一個)
-        default_data=_DEFAULT_DATA,
         run_names=_run_names(),
+        **_dataset_ctx(),
     )
 
 
@@ -226,9 +246,99 @@ def experiments():
         encoders=[c.model_dump() for c in reg.all_cards(include_unavailable=True)],
         available_keys=[c.model_key for c in reg.available_cards()],
         presets=presets_mod.names(),
-        default_data=_DEFAULT_DATA,
         run_names=_run_names(),
+        **_dataset_ctx(),
     )
+
+
+@app.route("/datasets-page")
+def datasets_page():
+    """資料集頁: 上傳新資料集 + 瀏覽 data/ 底下所有可用資料集。"""
+    return render_template(
+        "datasets.html", nav="datasets", route_seg="datasets-page",
+        data_root=_DATA, **_dataset_ctx(),
+    )
+
+
+@app.route("/datasets")
+def datasets_api():
+    """data/ 底下所有 ImageFolder 資料集 (JSON)。?refresh=1 強制重掃。"""
+    refresh = bool(request.args.get("refresh"))
+    return jsonify({"ok": True, "data_root": _DATA,
+                    "groups": dsreg.groups(_DATA, refresh=refresh)})
+
+
+def _under_data(path: str) -> str | None:
+    """把使用者給的路徑正規化到 data/ 底下; 越界回 None。"""
+    if not path:
+        return None
+    p = os.path.realpath(path if os.path.isabs(path) else os.path.join(_DATA, path))
+    root = os.path.realpath(_DATA)
+    return p if p.startswith(root + os.sep) else None
+
+
+@app.route("/datasets/validate", methods=["POST"])
+def datasets_validate():
+    """檢查任一路徑的資料集格式 MedClaw 是否吃得下 (不限 data/ 底下)。"""
+    path = (request.form.get("path") or "").strip()
+    if not path:
+        return jsonify({"ok": False, "error": "缺少 path"}), 400
+    if not os.path.isabs(path):
+        path = os.path.join(_DATA, path)
+    try:
+        return jsonify(dsreg.validate(path))
+    except Exception as e:                       # noqa: BLE001
+        return jsonify({"ok": False, "errors": [f"檢查失敗: {e}"],
+                        "warnings": [], "summary": None}), 400
+
+
+@app.route("/datasets/upload", methods=["POST"])
+def datasets_upload():
+    """上傳壓縮檔 → 解壓到 data/<name>/ → 檢查格式。回傳檢查報告 (JSON)。"""
+    import tempfile
+
+    f = request.files.get("archive")
+    if f is None or not f.filename:
+        return jsonify({"ok": False, "errors": ["沒有收到檔案"], "warnings": []}), 400
+    if dataset_ingest.archive_ext(f.filename) is None:
+        return jsonify({"ok": False, "warnings": [], "errors": [
+            f"不支援的檔案格式：{f.filename}（請上傳 .zip / .tar / .tar.gz）"]}), 400
+
+    name = (request.form.get("name") or "").strip() or \
+        dataset_ingest.default_name(f.filename)
+    overwrite = bool(request.form.get("overwrite"))
+
+    # 暫存在 data/ 底下 (與最終目的地同一個檔案系統); 底線開頭 → 不會被掃描器列出
+    tmp_dir = tempfile.mkdtemp(prefix="_upload_", dir=_DATA)
+    tmp_path = os.path.join(tmp_dir, "archive" + dataset_ingest.archive_ext(f.filename))
+    try:
+        f.save(tmp_path)
+        report = dataset_ingest.ingest(tmp_path, _DATA, name, overwrite=overwrite)
+    except dataset_ingest.IngestError as e:
+        return jsonify({"ok": False, "errors": [str(e)], "warnings": [],
+                        "summary": None}), 400
+    except Exception as e:                       # noqa: BLE001
+        return jsonify({"ok": False, "errors": [f"上傳處理失敗: {e}"], "warnings": [],
+                        "summary": None, "trace": traceback.format_exc()}), 500
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return jsonify(report)
+
+
+@app.route("/datasets/delete", methods=["POST"])
+def datasets_delete():
+    """刪除 data/ 底下的一個資料集目錄 (前端會先要求確認)。"""
+    import shutil
+    target = _under_data((request.form.get("path") or "").strip())
+    if not target or not os.path.isdir(target):
+        return jsonify({"ok": False, "error": "無效的資料集路徑（僅能刪除 data/ 底下的目錄）"}), 400
+    try:
+        shutil.rmtree(target)
+    except Exception as e:                       # noqa: BLE001
+        return jsonify({"ok": False, "error": str(e)}), 500
+    dsreg.invalidate(_DATA)
+    return jsonify({"ok": True})
 
 
 @app.route("/jobs-page")
@@ -535,6 +645,8 @@ def run_status():
                 running_trial = {
                     "trial_id": tid, "recipe": ct.get("recipe", {}),
                     "status": prog.get("status", "running"),
+                    # 進行中還沒跑最終 test → 這裡的分數/指標其實是 val (前端會標明)
+                    "is_running": True,
                     "primary_score": prog.get("best_score") or 0.0,
                     "metrics": prog.get("val") or {},
                     "curves": curves, "cm_img": None,

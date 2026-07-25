@@ -27,7 +27,7 @@ from . import encoder_registry as reg
 from . import presets
 from .schemas import (
     ComponentRef, DatasetProfile, EncoderChoice, HeadSpec, HyperParams,
-    NextAction, Recipe, TrialResult,
+    NextAction, Recipe, SearchOverride, TrialResult,
 )
 
 _MODEL = "claude-opus-4-8"
@@ -98,6 +98,18 @@ class _NextDecision(BaseModel):
 class _ReviewDecision(_NextDecision):
     """review_and_decide 的回應 — 在 _NextDecision 上加一段給使用者看的檢視說明。"""
     narrative: str = ""
+
+
+class _SearchChoice(BaseModel):
+    """review_search_choice 的回應 — 是否覆寫樹搜尋 policy 選出的節點。"""
+    override: bool = False
+    stage: Literal["draft", "improve", "debug", "resume"] = "improve"
+    parent_id: Optional[str] = None       # 目標節點的 trial_id; stage=draft 時留空
+    # 只在 stage=draft 時使用 (指定新起點的 encoder / adaptation / 超參起點)
+    encoder: Optional[str] = None
+    adaptation: Optional[Literal["finetune", "lp"]] = None
+    preset: Optional[str] = None
+    reason: str = ""
 
 
 
@@ -350,6 +362,7 @@ class LLMAdvisor:
                 "provenance": t.recipe.provenance,
                 "train_loss_curve": cv.get("train_loss", []),
                 "val_loss_curve": cv.get("val_loss", []),
+                "val_score_curve": cv.get("val_score", []),
                 "gpu_stats": t.gpu_stats,  # 利用率/記憶體 (調 batch/worker 的參考)
             })
         return out
@@ -387,6 +400,46 @@ class LLMAdvisor:
         return NextAction(stop=d.stop or next_recipe is None, reason=d.reason,
                           mutation=d.mutation, next_recipe=next_recipe)
 
+    # ---- 樹搜尋節點選擇的覆寫機會 (policy 選完 → 決策層過目) ----------
+    def review_search_choice(self, profile: DatasetProfile, tree: list[dict],
+                             proposal: dict,
+                             discussion: list[dict]) -> SearchOverride:
+        """policy 已選好節點, 這裡讓 LLM 有改選的機會。
+
+        傳入整棵解答樹 (每個節點附「目前允許哪些階段」) 與這次的選擇;
+        LLM 可維持原議或改選。回傳的選擇由 LoopController 再驗證一次。
+        """
+        talk = [{"role": e.get("role"), "text": e.get("text")}
+                for e in (discussion or [])[-20:]]
+        try:
+            d: _SearchChoice = self._messages_parse(
+                f"資料集 DatasetProfile:\n{profile.model_dump_json(indent=2)}\n\n"
+                f"目前的解答樹 (每個節點的 allowed 欄位 = 這個節點現在允許的階段):\n"
+                f"{json.dumps(tree, ensure_ascii=False, indent=2)}\n\n"
+                f"樹搜尋 policy 這一輪的選擇:\n"
+                f"{json.dumps(proposal, ensure_ascii=False, indent=2)}\n\n"
+                f"與使用者的討論記錄 (由舊到新):\n"
+                f"{json.dumps(talk, ensure_ascii=False, indent=2)}\n\n"
+                f"policy 是規則 + 依指標抽樣, 看不懂討論內容。請你過目這個選擇:\n"
+                f"- 維持原議 → override=false（多數情況；policy 的抽樣本身有探索價值，"
+                f"不要只因為『分數不是最高』就改選）。\n"
+                f"- 改選 → override=true, 並給 stage 與 parent_id。可用的 stage 只有\n"
+                f"  該節點 allowed 裡列出的; stage=\"draft\" 表示開一條全新起點 "
+                f"(parent_id 留空, 可用 encoder/adaptation/preset 指定新起點的配置)。\n"
+                f"**特別注意討論中標有【QA 結論】的訊息**: 那是問答 agent 依實驗資料"
+                f"對使用者提問得出的結論, 若其中要求換 encoder / 開新 draft / 回頭改良"
+                f"某個特定節點, 這裡就是唯一能落實的地方 (改良階段只能在已選定的節點上"
+                f"做變異, 換不了節點也開不了 draft)。\n"
+                f"reason 請用一句話說明維持或改選的依據 (會顯示給使用者)。",
+                _SearchChoice, label="review_search_choice")
+        except Exception:
+            return SearchOverride(override=False)   # 失敗不阻斷迴圈, 沿用 policy
+        return SearchOverride(
+            override=d.override, stage=d.stage, parent_id=d.parent_id,
+            encoder=d.encoder, adaptation=d.adaptation, preset=d.preset,
+            reason=d.reason,
+        )
+
     # ---- 人機協作: 檢視所有資料 + 討論 → 說明 + 決定 (或中斷) --------
     def review_and_decide(self, profile: DatasetProfile, encoder: EncoderChoice,
                           history: list[TrialResult], discussion: list[dict],
@@ -413,6 +466,10 @@ class LLMAdvisor:
             f"資料集 DatasetProfile:\n{profile.model_dump_json(indent=2)}\n\n"
             f"目前 encoder: {encoder.model_key}。已完成 trials (由舊到新):\n"
             f"{json.dumps(hist, ensure_ascii=False, indent=2)}\n\n"
+            f"欄位說明: primary_score / metrics 是 **test set** 成績 (訓練結束後用 val "
+            f"最佳 checkpoint 在 test 上重跑一次); train_loss_curve / val_loss_curve / "
+            f"val_score_curve 則是訓練期間逐 epoch 的 train/val，長度 = 實際跑完的 epoch 數，"
+            f"不含最終 test。兩者是不同 split，val 通常高於 test，落差本身不代表有問題。\n\n"
             f"本輪的變異基準 (樹搜尋 policy 依指標機率選出, 不一定是全域最佳): "
             f"{bt.trial_id if bt else '無'}。\n\n"
             f"與使用者的討論記錄 (由舊到新):\n"

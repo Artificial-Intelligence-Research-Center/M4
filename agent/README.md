@@ -44,6 +44,8 @@
 | `skill_advisor.py` | §5.2 `SkillAdvisor` — 委派給 `finetune-advisor` skill（file-based handoff） |
 | `auto_finetune.py` | 設定檔驅動入口 (§7) |
 | `run.py` | P0 單一 trial 入口（保留） |
+| `dataset_registry.py` | 掃描 `data/` 列出可用資料集 + `validate()` 格式檢查（MedClaw 可否訓練） |
+| `dataset_ingest.py` | 上傳資料集：壓縮檔安全解壓（zip-slip 防護）+ 自動找出資料集根目錄 |
 | `web/` | 最小 Flask 界面 |
 
 ## 用法
@@ -94,7 +96,24 @@ python -m agent.auto_finetune --data_path ./data/5_fold_PAPILA/PAPILA_seed42_fol
    給使用者；交 `Advisor.review_and_decide(base=選中節點)` 做一個正交變異長出 child。
 
 metric 回饋自然修剪差的分支；整棵樹落地 `<run_dir>/search_tree.json`
-（節點含 encoder/stage/parent/metric/select_prob/mutation）。
+（節點含 encoder/stage/parent/metric/select_prob/overridden/mutation）。
+
+**決策層可以改選節點（`loop.select_override`，預設開）。** policy 是規則＋依指標抽樣，
+看不懂討論內容；而 `review_and_decide` 只能在**已選定的節點上**做變異，換不了節點也
+開不了 draft。所以討論裡的【QA 結論】若說「下一輪開一條 DINOv2 finetune 的 draft」，
+在原本的流程裡是無法落實的。現在 policy 選完後會多一步
+`Advisor.review_search_choice(tree, proposal, discussion)`：把整棵樹（每個節點附
+`allowed` = 該節點現在允許的階段）和這一輪的選擇交給決策層過目，它可以維持原議，或改選
+`draft`（可指定 encoder/adaptation/preset）／`improve`／`debug`／`resume` 的任一節點。
+
+改選一律經 LoopController 驗證——節點要存在、improve 需有成功分數、debug 需為可除錯的
+失敗葉節點、resume 需通過續訓護欄（`force=True` 只跳過 `resume_prob` 那道機率關卡，
+重複計算與正確性的護欄照舊）、draft 的 encoder/preset 要在目錄裡。不合法就沿用 policy
+的選擇，並把原因寫進討論。維持或改選的理由都會顯示給使用者，節點也會標記
+`overridden`（解答樹 tooltip 會寫「起點由決策層改選」）。
+
+代價是每輪多一次 LLM 呼叫；`advisor=heuristic` 一律沿用 policy，不想要可設
+`loop.select_override: false`。
 
 **StopPolicy（聯集）**：`max_trials` 硬上限、時間預算、使用者/Advisor 停止，以及
 「已完成 ≥ `min_trials` 且連續 `patience` 輪**改良嘗試**（improve/resume）無提升
@@ -124,6 +143,54 @@ python -m agent.run --data_path ./data/5_fold_PAPILA/PAPILA_seed42_fold0 --dry_r
 ```bash
 python -m agent.web.app --host 0.0.0.0 --port 5000
 ```
+
+分頁：**工作台**（決策討論 + notebook）、**新實驗**、**資料集**、**超參起點**、
+**背景工作**、**歷史 runs**。
+
+### primary 是 test 成績，曲線是 val
+
+一個 trial 裡有兩組數字，UI 上都已標明 split：
+
+| | 來源 | 用途 |
+| --- | --- | --- |
+| **逐 epoch 曲線**（loss / score 圖） | 訓練期間每個 epoch 在 **val** 上評估 | 挑最佳 checkpoint、判斷收斂與過擬合 |
+| **primary / metrics** | 訓練結束後用 val 最佳 checkpoint 在 **test** 上重跑一次 | trial 之間比較、histogram、解答樹分數 |
+
+所以「圖上 best 0.861」與「primary 0.765」不一樣是正常的：不同 split，且 checkpoint
+是照 val 挑的，val 分數本來就樂觀偏高。進行中的 trial 還沒跑 test，卡片上會標
+`primary (val)` 表示那是目前的 val 最佳分數。
+
+解析上有兩個坑，`log_curves.split_final_eval()` / `METRIC_RE` 已處理，web 與 advisor
+共用同一份實作（避免兩邊 regex 各自演化）：
+
+- 最終 test 的輸出與逐 epoch val **完全同格式**（連 `val loss:` 字樣都一樣），不切掉的話
+  曲線末端會多一個其實是 test 的「epoch」，看起來像每個 trial 最後一個 epoch 都固定跳升，
+  也會讓 `unconverged()` 誤判成 val_loss 回升而不續訓。
+- kappa 低於隨機水準時是負數（score 也跟著變負），指標 regex 少了 `-?` 會讓整個區塊匹配
+  失敗，該 epoch 從 score 曲線消失、之後每個點的 epoch 位置左移。
+
+### 資料集（選擇 / 上傳 / 格式檢查）
+
+「工作台」與「新實驗」的資料集欄位是**下拉選單**，內容由 `dataset_registry.scan()`
+掃描 `data/` 而來（依上層目錄分組、標示類別數 / 張數 / fold，並可切換為自訂路徑）。
+無法直接訓練的資料集會標 ⚠ 並列出原因。
+
+「資料集」分頁可**上傳新資料集**（`.zip` / `.tar` / `.tar.gz`，單次上限 16 GB），
+解壓到 `data/<名稱>/` 後立刻檢查格式。壓縮檔若多包一層外層目錄會自動攤平；
+含 `..`／絕對路徑／symlink 的成員一律拒收。資料集太大不方便上傳時，可以直接把目錄
+放到伺服器上，再用「檢查既有路徑」驗證。
+
+格式檢查（`dataset_registry.validate()`）對照的是 `main_finetune.py` 的實際載入方式
+（三個 split 各自 `ImageFolder`，label index = 該 split 內排序後的類別資料夾名）：
+
+| 判定 | 條件 |
+| --- | --- |
+| 錯誤（無法訓練） | 缺 `train`/`val`/`test` 任一；split 底下沒有類別子目錄；三個 split 類別名稱不一致（會標籤錯位）；類別數 < 2；有空的類別目錄；抽樣影像讀不開 |
+| 警告（可訓練但需留意） | train < 100 張；val/test < 10 張；類別不平衡 ≥ 3:1；類別目錄下還有子目錄（會被攤平為同一類）；影像短邊 < 224；抽樣影像全為灰階 |
+
+API：`GET /datasets`（清單，`?refresh=1` 重掃）、`POST /datasets/validate`（`path=`）、
+`POST /datasets/upload`（`archive=` 檔案、`name=`、`overwrite=`）、
+`POST /datasets/delete`（`path=`，限 `data/` 底下）。
 
 ### 資料管線效能（GPU 利用率低的根因修正）
 

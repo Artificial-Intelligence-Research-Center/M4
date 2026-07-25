@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_dataset_picker.html" import dataset_picker %}
 {% block title %}新實驗 — M4{% endblock %}
 {% block content %}
   <div id="gpu-chk" class="banner" style="background:#f4f6f9;color:#555">
@@ -19,8 +20,7 @@
   <div class="card">
     <h2>單一實驗（分析 / 單一 trial）</h2>
     <form id="form">
-      <label>資料集路徑 (ImageFolder: train/val/test/&lt;class&gt;/*)</label>
-      <input type="text" name="data_path" value="{{ default_data }}">
+      {{ dataset_picker(dataset_groups, default_data, 'dp-single') }}
       <div class="row">
         <div>
           <label>Encoder</label>
@@ -103,14 +103,22 @@ async function pollProgress() {
     + `<span class="muted">${j.percent}%${j.train_time ? ' · ' + j.train_time : ''}</span></div>`;
   html += `<div class="bar"><span style="width:${j.percent}%"></span></div>`;
   const s = [];
-  if (j.best_score !== null) s.push(`best score <b>${fmt(j.best_score)}</b> @ epoch ${j.best_epoch}`);
+  if (j.best_score !== null) s.push(`<b>val</b> best score <b>${fmt(j.best_score)}</b> @ epoch ${j.best_epoch}`);
   if (j.train_loss !== null) s.push(`train loss ${fmt(j.train_loss)}`);
   if (j.val_loss !== null) s.push(`val loss ${fmt(j.val_loss)}`);
   html += `<div class="muted" style="margin-top:8px">${s.join(' · ') || '尚未有指標'}</div>`;
   if (j.val) {
-    html += '<label>最新 val 指標</label><div class="metrics">';
+    html += '<label>最新 val 指標 <span class="muted">（訓練中每個 epoch 在 val 上評估）</span></label><div class="metrics">';
     for (const k in METRIC_LABELS) if (j.val[k] !== undefined)
       html += `<div class="m"><b>${fmt(j.val[k])}</b><span>${METRIC_LABELS[k]}</span></div>`;
+    html += '</div>';
+  }
+  // 最終 test: 訓練結束後用 val 最佳 checkpoint 重跑; ledger 的 primary_score 就是取這裡
+  if (j.final_test && j.final_test.metrics) {
+    html += '<label>最終 <b>test</b> 指標 <span class="muted">（用 val 最佳 checkpoint 重跑 · trial 的 primary 取自這裡，'
+          + '與上方 val 是不同 split，通常會低一些）</span></label><div class="metrics">';
+    for (const k in METRIC_LABELS) if (j.final_test.metrics[k] !== undefined)
+      html += `<div class="m"><b>${fmt(j.final_test.metrics[k])}</b><span>${METRIC_LABELS[k]}</span></div>`;
     html += '</div>';
   }
   html += '<label>Log 尾端</label><pre style="max-height:220px">' + (j.tail || '') + '</pre>';

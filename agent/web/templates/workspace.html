@@ -1,6 +1,8 @@
 {% extends "base.html" %}
+{% from "_dataset_picker.html" import dataset_picker %}
 {% block title %}工作台 — M4 自動微調 Agent{% endblock %}
 {% block main_class %}wide{% endblock %}
+{% block body_class %}fixed-h{% endblock %}
 {% block content %}
 <div class="split">
 
@@ -8,7 +10,10 @@
   <div class="pane-left">
     <div class="card" style="margin-bottom:0" data-key="chat">
       <h2 style="display:flex;align-items:center;gap:8px">
-        <span style="flex:1">決策討論（LLM ⇄ 你）</span>
+        <span style="flex:0 0 auto">決策討論（LLM ⇄ 你）</span>
+        <!-- 中間: 整體進度 (已完成 trials / 當前 trial epoch / %) -->
+        <span id="chat-prog" style="flex:1 1 auto;min-width:0;text-align:center;font-size:12px;
+              font-weight:400;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
         <span class="cell-tools">
           <button type="button" data-act="zout" title="縮小內容">−</button>
           <span class="zl">100%</span>
@@ -16,6 +21,7 @@
           <button type="button" data-act="full" class="fs" title="全螢幕 / 還原 (Esc)">⛶</button>
         </span>
       </h2>
+      <div id="chat-prog-bar" class="bar" style="height:4px;display:none"><span style="width:0"></span></div>
       <label>目前 run</label>
       <div style="display:flex;gap:6px;align-items:center">
         <select id="rs-run" onchange="pollRunStatus()" style="flex:1">
@@ -52,8 +58,7 @@
     <details class="card" {% if not run_names %}open{% endif %}>
       <summary style="cursor:pointer;font-weight:600;font-size:15px">＋ 新完整流程（多 encoder × 改良迴圈）</summary>
       <form id="form-full" action="run_full/" method="post" style="margin-top:12px">
-        <label>資料集路徑</label>
-        <input type="text" name="data_path" value="{{ default_data }}">
+        {{ dataset_picker(dataset_groups, default_data, 'dp-full') }}
         <div class="row">
           <div><label>決策層 (advisor)</label>
             <select name="advisor">{% for a in advisors %}<option value="{{ a }}">{{ a }}</option>{% endfor %}</select></div>
@@ -188,7 +193,9 @@ function svgTree(tree, cmap){
                'stage='+n.stage+(n.debug_depth?(' (debug_depth='+n.debug_depth+')'):'')
                               +(n.resume_depth?(' (resume_depth='+n.resume_depth+')'):''),
                n.is_buggy?'狀態=失敗':('metric='+fmt(n.metric)), mut?('mutation='+mut):'',
-               (n.select_prob!=null&&n.select_prob<1)?('policy 依指標抽中此起點的機率='+(n.select_prob*100).toFixed(0)+'%'):'',
+               n.overridden ? '起點由決策層改選（非 policy 抽樣）'
+                 : ((n.select_prob!=null&&n.select_prob<1)
+                    ? ('policy 依指標抽中此起點的機率='+(n.select_prob*100).toFixed(0)+'%') : ''),
                isBest?'★ 全域最佳':''].filter(Boolean).join('\n');
     const tid=n.trial_id||'';
     g+=`<g ${tid?`data-tid="${esc(tid)}" style="cursor:pointer"`:'style="cursor:default"'}>`
@@ -243,7 +250,7 @@ function svgTreeAll(treeData, cmap){
     +`<span><svg width="14" height="14" viewBox="0 0 26 26" style="vertical-align:-2px">${treeNodeShape('resume',13,13,STAGE_COLORS.resume,'')}</svg> ${STAGE_LABELS.resume}</span>`
     +'<span style="color:#c0392b">✗ 虛線框=失敗 trial</span>'
     +'<span style="color:#1f2a44">★ 實線框=全域最佳</span>'
-    +'<span class="muted">節點上方=encoder；下方=primary 分數與變異；游標移到節點看摘要，<b>點擊節點跳出完整結果</b></span>'
+    +'<span class="muted">節點上方=encoder；下方=primary（test 成績）與變異；游標移到節點看摘要，<b>點擊節點跳出完整結果</b></span>'
     +'</div>';
   return h;
 }
@@ -262,8 +269,15 @@ function trialCard(t, cmap){
     const g=t.gpu_stats, low=g.util_avg<60;
     h+=`<tr><td>GPU</td><td>利用率 avg <b${low?' style="color:#9a5b12"':''}>${g.util_avg}%</b>（median ${g.util_median}%）· 記憶體峰值 ${(g.mem_peak_mb/1024).toFixed(1)}/${(g.mem_total_mb/1024).toFixed(1)} GB${low?' <span class="muted">（偏低，下一輪自動調整）</span>':''}</td></tr>`;
   }
-  h+=`<tr><td>primary</td><td><b>${fmt(t.primary_score)}</b></td></tr>`;
-  if(t.metrics && Object.keys(t.metrics).length) h+=`<tr><td>metrics</td><td class="muted">${esc(JSON.stringify(t.metrics))}</td></tr>`;
+  // 已完成的 trial: primary/metrics 來自最終 test; 進行中的 trial 還沒跑 test, 顯示的是 val 目前最佳
+  const split = t.is_running ? 'val' : 'test';
+  const note = t.is_running
+    ? '— 目前 <b>val</b> 最佳分數（trial 尚未結束，還沒跑最終 test）'
+    : '— <b>test set</b> 成績：用 val 最佳 checkpoint 在 test 上重跑一次的結果'
+      + '（下方曲線是逐 epoch 的 <b>val</b>，兩者不同 split，val 通常較高）';
+  h+=`<tr><td>primary <span class="muted">(${split})</span></td><td><b>${fmt(t.primary_score)}</b>`
+    +` <span class="muted">${note}</span></td></tr>`;
+  if(t.metrics && Object.keys(t.metrics).length) h+=`<tr><td>metrics <span class="muted">(${split})</span></td><td class="muted">${esc(JSON.stringify(t.metrics))}</td></tr>`;
   h+='</table>';
   const why=[];
   if(r.encoder.rationale) why.push('選 encoder：'+r.encoder.rationale);
@@ -279,15 +293,25 @@ function trialCard(t, cmap){
     why.push('⚡ GPU 最佳化：'+esc(prov.gpu_opt.from_trial||'')+' 利用率 '+prov.gpu_opt.util_avg+'%（目標 ≥'+prov.gpu_opt.target+'%）→ '+chs);
   }
   if(why.length) h+='<div class="banner ok" style="margin-top:6px">🧠 決策理由（advisor='+esc(prov.advisor||'?')+'）<br>'+why.map(esc).join('<br>')+'</div>';
+  // 曲線一律是「逐 epoch 的 val」; 最終 test (最佳 checkpoint 重跑) 另外標在圖下, 不畫進曲線
+  const ft=cv.final_test, ftm=(ft&&ft.metrics)||null;
+  const ftLine = ftm
+    ? `<div class="muted" style="margin-top:2px">最終 <b>test</b>（用 val 最佳 checkpoint 重跑）：`
+      + `score <b>${fmt(ftm.score)}</b> · accuracy ${fmt(ftm.accuracy)} · roc_auc ${fmt(ftm.roc_auc)} · f1 ${fmt(ftm.f1)}`
+      + (ft.loss!=null?` · loss ${fmt(ft.loss)}`:'') + ' ← 這就是上方的 primary</div>'
+    : '';
   h+='<div class="row" style="margin-top:6px">'
-    +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Loss（train / val）</div>'
+    +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Loss（train / val · 逐 epoch）</div>'
       +svgLine([{name:'train_loss', color:'#c0392b', data:cv.train_loss},
-                {name:'val_loss',   color:'#e8710a', data:cv.val_loss, best:'min'}])+'</div>'
-    +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Score / 指標（val · 0–1）</div>'
+                {name:'val_loss',   color:'#e8710a', data:cv.val_loss, best:'min'}])
+      +(ft&&ft.loss!=null?`<div class="muted" style="margin-top:2px">最終 test loss ${fmt(ft.loss)}（未畫入曲線）</div>`:'')
+      +'</div>'
+    +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Score / 指標（<b>val</b> · 逐 epoch · 0–1）</div>'
       +svgLine([{name:'score',    color:'#1a9e5c', data:cv.val_score, best:'max'},
                 {name:'accuracy', color:'#2d6cdf', data:cv.val_accuracy},
                 {name:'roc_auc',  color:'#b5179e', data:cv.val_roc_auc},
-                {name:'f1',       color:'#00838f', data:cv.val_f1}])+'</div>'
+                {name:'f1',       color:'#00838f', data:cv.val_f1}])
+      +ftLine+'</div>'
     +'</div>';
   if(t.cm_img) h+=`<div style="margin-top:6px"><span class="muted">confusion matrix (test)</span><br><img src="${t.cm_img}" style="max-width:260px;border-radius:6px"></div>`;
   return h;
@@ -339,14 +363,35 @@ function _showLoading(nb){
   nb._cache={};
   nb.innerHTML='<div class="muted" style="text-align:center;padding:48px 0">'
     +'<span class="spin"></span><div style="margin-top:10px">載入實驗資料中…（trial 越多越久）</div></div>';
+  renderChatProgress(null);   // 換 run 時先清掉上一個 run 的進度, 避免顯示舊數字
   const box=document.getElementById('chat-box');
   if(box){ _chatSig='';
     box.innerHTML='<div class="muted" style="text-align:center;padding:24px 0">'
       +'<span class="spin"></span><div style="margin-top:8px">載入討論中…</div></div>'; }
 }
+// 整體進度 → 「決策討論」標題列中間 + 標題下的細進度條。
+// 窄面板時文字自動省略 (title 屬性帶完整內容)。
+function renderChatProgress(j, cur){
+  const el=document.getElementById('chat-prog'), bar=document.getElementById('chat-prog-bar');
+  if(!el) return;
+  if(!j){ el.innerHTML=''; el.title=''; if(bar) bar.style.display='none'; return; }
+  let html=`已完成 <b>${j.n_done}</b> trials`, plain=`已完成 ${j.n_done} trials`;
+  if(cur && cur.status){
+    const ep=(cur.cur_epoch==null?'?':cur.cur_epoch+1)+' / '+(cur.total_epochs||'?');
+    html+=` · <span class="pill ${cur.status}">${cur.status}</span> epoch <b>${ep}</b> · ${cur.percent}%`;
+    plain+=` · ${cur.status} · 當前 trial epoch ${ep} · ${cur.percent}%`;
+  }
+  if(j.stopped){ html+=' · <span class="pill error">已要求中斷</span>'; plain+=' · 已要求中斷'; }
+  el.innerHTML=html; el.title=plain;
+  if(bar){
+    const on=!!(cur && cur.status);
+    bar.style.display=on?'':'none';
+    if(on) bar.firstElementChild.style.width=(cur.percent||0)+'%';
+  }
+}
 async function pollRunStatus(){
   const sel=document.getElementById('rs-run'), nb=document.getElementById('nb');
-  if(!sel || !sel.value){ return; }
+  if(!sel || !sel.value){ renderChatProgress(null); return; }
   if(_loadedRun!==sel.value) _showLoading(nb);
   let j;
   try { j = await (await fetch('run_status/?run='+encodeURIComponent(sel.value))).json(); }
@@ -355,15 +400,8 @@ async function pollRunStatus(){
   const cmap={}, done=j.trials||[], cur=j.current, rt=j.running_trial;
   _lastRun={done, rt, cmap};   // 供解答樹節點點擊 → 跳出式結果對話框查資料
   let html='';
-  // 進度 cell
-  let prog=`已完成 <b>${j.n_done}</b> trials`;
-  if(cur && cur.status){
-    const pill=`<span class="pill ${cur.status}">${cur.status}</span>`;
-    const ep=(cur.cur_epoch==null?'?':cur.cur_epoch+1)+' / '+(cur.total_epochs||'?');
-    prog+=`<div style="margin-top:6px">${pill} 當前 trial epoch <b>${ep}</b> <span class="muted">· ${cur.percent}%</span></div>`
-      +`<div class="bar" style="margin-top:4px"><span style="width:${cur.percent}%"></span></div>`;
-  }
-  html+=cell('進度', j.stopped?'<span class="pill error">已要求中斷</span>':'', prog, 'progress');
+  // 進度: 顯示在左側「決策討論」標題列中間 (不再單獨佔一格 notebook cell)
+  renderChatProgress(j, cur);
   // 設定 cell
   if(j.config) html+=cell('本次 run 設定 (config.yaml)','', '<pre style="max-height:240px">'+esc(j.config)+'</pre>', 'config');
   // 進行中 trial cell
@@ -371,7 +409,7 @@ async function pollRunStatus(){
   // histogram cell
   const bars=done.filter(t=>t.status==='done').map(t=>({label:t.trial_id.length>34?'…'+t.trial_id.slice(-32):t.trial_id,
     value:t.primary_score||0, color:encColor(cmap, t.recipe.encoder.model_key)}));
-  html+=cell('結果 histogram（各 trial primary · 顏色=encoder）','', svgBars(bars), 'histogram');
+  html+=cell('結果 histogram（各 trial primary＝test 成績 · 顏色=encoder）','', svgBars(bars), 'histogram');
   // 解答樹 cell (AIDE 式搜尋)
   if(j.search_tree && Object.keys(j.search_tree).length)
     html+=cell('🌳 解答樹（AIDE 式搜尋：先開滿 draft → 每輪依指標機率選節點 improve/debug/resume）','', svgTreeAll(j.search_tree, cmap), 'tree');

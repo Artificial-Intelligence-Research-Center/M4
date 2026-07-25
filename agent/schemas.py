@@ -125,6 +125,23 @@ class TrialResult(BaseModel):
     gpu_stats: dict = Field(default_factory=dict)
 
 
+class SearchOverride(BaseModel):
+    """決策層對「樹搜尋 policy 已選出的節點」的覆寫 (§5.7)。
+
+    policy 先依規則/機率選好 (stage, parent)，再把選擇連同整棵樹交給 Advisor 過目；
+    Advisor 可維持原選擇 (override=False)，或改選別的節點/階段。LoopController 會
+    驗證合法性 (節點存在、狀態允許該階段)，不合法就沿用 policy 的選擇。
+    """
+    override: bool = False
+    stage: Literal["draft", "improve", "debug", "resume"] = "improve"
+    parent_id: Optional[str] = None      # 目標節點 trial_id; stage=draft 時忽略
+    # 以下只在 stage=draft 時有意義 (指定新起點要用哪個 encoder / 超參起點)
+    encoder: Optional[str] = None
+    adaptation: Optional[Literal["finetune", "lp"]] = None
+    preset: Optional[str] = None
+    reason: str = ""                     # 覆寫或維持原議的理由 (寫進討論給使用者看)
+
+
 class NextAction(BaseModel):
     stop: bool
     reason: str = ""

@@ -1,0 +1,91 @@
+{# 資料集選擇器 — 掃描 data/ 產生的下拉選單 + 摘要 + 格式檢查。
+   用法: {% from "_dataset_picker.html" import dataset_picker %}
+         {{ dataset_picker(dataset_groups, default_data, 'dp-full') }}
+   送出的欄位仍是 data_path (選單 或 自訂路徑輸入框, 只會有一個帶 name)。 #}
+{% macro dataset_picker(groups, default_data, uid='dp') %}
+<label for="{{ uid }}-sel">資料集
+  <span class="muted">（ImageFolder：train/val/test/&lt;class&gt;/*）</span></label>
+<select id="{{ uid }}-sel" name="data_path" onchange="dpSync('{{ uid }}')">
+  {%- for g in groups %}
+    {%- if g.name %}<optgroup label="{{ g.name }}">{% endif %}
+    {%- for d in g.datasets %}
+  <option value="{{ d.path }}" {% if d.path == default_data %}selected{% endif %}>
+    {% if not d.ready %}⚠ {% endif %}{{ d.name }} — {{ d.num_classes }} 類 / {{ d.total }} 張
+    {%- if not d.ready %}（{{ d.issues|join('、') }}）{% endif %}</option>
+    {%- endfor %}
+    {%- if g.name %}</optgroup>{% endif %}
+  {%- endfor %}
+  <option value="__custom__">✎ 自訂路徑…</option>
+</select>
+<input type="text" id="{{ uid }}-custom" name="data_path" value="{{ default_data }}"
+       disabled style="display:none;margin-top:6px"
+       placeholder="資料集目錄的絕對路徑（或相對 data/ 的路徑）"
+       oninput="dpInfo('{{ uid }}')">
+<div class="muted" style="margin-top:4px">
+  找不到要用的資料集？<a href="datasets-page/" target="_blank">到「資料集」頁上傳新的</a>。</div>
+<div id="{{ uid }}-info" class="muted" style="margin-top:6px"></div>
+<script>
+window.DP_DATASETS = window.DP_DATASETS || {};
+(function(){
+  const gs = {{ groups|tojson }};
+  gs.forEach(g => g.datasets.forEach(d => { window.DP_DATASETS[d.path] = d; }));
+})();
+if (!window.dpSync) {
+  // 選單 / 自訂輸入框只會有一個帶 name=data_path → 表單送出的值永遠明確
+  window.dpSync = function(uid){
+    const sel = document.getElementById(uid + '-sel');
+    const cus = document.getElementById(uid + '-custom');
+    const custom = sel.value === '__custom__';
+    cus.disabled = !custom;
+    cus.style.display = custom ? '' : 'none';
+    if (custom) { sel.removeAttribute('name'); cus.focus(); }
+    else { sel.setAttribute('name', 'data_path'); cus.value = sel.value; }
+    dpInfo(uid);
+  };
+  window.dpPath = function(uid){
+    const sel = document.getElementById(uid + '-sel');
+    return sel.value === '__custom__'
+      ? document.getElementById(uid + '-custom').value.trim() : sel.value;
+  };
+  window.dpInfo = function(uid){
+    const box = document.getElementById(uid + '-info'), p = dpPath(uid);
+    const d = window.DP_DATASETS[p];
+    const chk = `<button type="button" class="ghost" style="margin:0;padding:3px 9px;font-size:12px"
+        onclick="dpCheck('${uid}')">檢查格式</button>`;
+    if (!d) {
+      box.innerHTML = p ? `<code>${esc(p)}</code>（不在 data/ 清單中） ${chk}`
+                        : '請選擇或輸入資料集路徑';
+      return;
+    }
+    const cls = d.classes.map(c => `${esc(c)} <b>${(d.counts.train||{})[c] ?? '—'}</b>`).join('、');
+    box.innerHTML = (d.ready ? '' :
+        `<div class="banner warn" style="margin:0 0 6px">⚠ 這個資料集目前無法訓練：${esc(d.issues.join('、'))}
+          — 按「檢查格式」看細節</div>`)
+      + `train <b>${d.n_train}</b> / val <b>${d.n_val}</b> / test <b>${d.n_test}</b>`
+      + ` · 不平衡比 ${d.imbalance_ratio}` + (d.fold !== null ? ` · fold ${d.fold}` : '')
+      + ` &nbsp;${chk}<br>類別（train）：${cls}<br><code>${esc(d.rel_path)}</code>`;
+  };
+  window.dpCheck = async function(uid){
+    const box = document.getElementById(uid + '-info'), p = dpPath(uid);
+    if (!p) return;
+    const prev = box.innerHTML;
+    box.innerHTML = '<span class="spin" style="width:12px;height:12px;border-width:2px;vertical-align:-2px"></span> 檢查中…';
+    let r; try {
+      const fd = new FormData(); fd.append('path', p);
+      r = await (await fetch('datasets/validate/', {method:'POST', body:fd})).json();
+    } catch(e) { box.innerHTML = prev + '<div class="banner warn">檢查失敗（連線錯誤）</div>'; return; }
+    box.innerHTML = prev + datasetReportHTML(r);
+  };
+}
+document.addEventListener('DOMContentLoaded', function(){
+  // 網址帶 ?data=<path> (從資料集頁按「用此資料集開實驗」) → 預先選好
+  const want = new URLSearchParams(location.search).get('data');
+  const sel = document.getElementById('{{ uid }}-sel');
+  if (want && sel) {
+    if ([...sel.options].some(o => o.value === want)) sel.value = want;
+    else { sel.value = '__custom__'; document.getElementById('{{ uid }}-custom').value = want; }
+  }
+  dpSync('{{ uid }}');
+});
+</script>
+{% endmacro %}

@@ -80,6 +80,22 @@
   .split { display:flex; gap:10px; align-items:flex-start; }
   .pane-left { flex: 0 0 420px; position: sticky; top: 12px; }
   .pane-right { flex: 1 1 auto; min-width: 0; }
+  /* 工作台 (body.fixed-h): 版面撐滿視窗高度, 捲軸只出現在左/右欄內部 —
+     整頁不再有捲軸 (header 固定在上方, 兩欄各自捲動)。窄螢幕 (≤900px) 改回
+     單欄堆疊, 那時仍用整頁捲軸。 */
+  @media (min-width: 901px) {
+    body.fixed-h { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+    body.fixed-h header { flex: 0 0 auto; }
+    body.fixed-h main.wide { flex: 1 1 auto; min-height: 0; display: flex;
+                             margin: 16px 0 0; }
+    body.fixed-h .split { flex: 1 1 auto; min-height: 0; align-items: stretch; }
+    /* 兩欄各自捲動; padding-bottom 讓最後一格不貼著視窗底緣 */
+    body.fixed-h .pane-left, body.fixed-h .pane-right {
+      overflow-y: auto; min-height: 0; padding-bottom: 16px; }
+    body.fixed-h .pane-left { position: static; flex: 0 0 420px; }
+    body.fixed-h .pane-right { padding-right: 4px; }
+    body.fixed-h .split-bar { position: static; max-height: none; align-self: stretch; }
+  }
   /* 左右分割線: 拖曳調整兩欄比例 (雙擊還原; 寬度記在 localStorage) */
   .split-bar { flex:0 0 6px; align-self:stretch; cursor:col-resize; border-radius:3px;
                background:#e3e6ea; position:sticky; top:12px; max-height:calc(100vh - 24px);
@@ -110,13 +126,14 @@
   #chat-box { display:flex; flex-direction:column; }
 </style>
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
 <div id="loadbar"></div>
 <header>
   <h1>MedClaw</h1>
   <nav>
     <a href="./"            class="{{ 'on' if nav=='workspace' }}">工作台</a>
     <a href="experiments/"  class="{{ 'on' if nav=='experiments' }}">新實驗</a>
+    <a href="datasets-page/" class="{{ 'on' if nav=='datasets' }}">資料集</a>
     <a href="presets/"      class="{{ 'on' if nav=='presets' }}">超參起點</a>
     <a href="jobs-page/"    class="{{ 'on' if nav=='jobs' }}">背景工作</a>
     <a href="history/"      class="{{ 'on' if nav=='history' }}">歷史 runs</a>
@@ -132,6 +149,40 @@ function esc(s){ return String(s).replace(/[&<>]/g, m=>({'&':'&amp;','<':'&lt;',
 const METRIC_LABELS = {accuracy:'Accuracy', f1:'F1', roc_auc:'ROC AUC', average_precision:'AP',
   recall:'Recall', precision:'Precision', kappa:'Kappa', jaccard:'Jaccard', hamming:'Hamming', score:'Score'};
 const ENC_COLORS = ['#2d6cdf','#e8710a','#1a9e5c','#b5179e','#00838f','#c0392b','#7048e8'];
+// 資料集格式檢查報告 → HTML (資料集頁與各表單的「檢查格式」共用)
+function datasetReportHTML(r){
+  if(!r) return '<div class="banner warn">沒有檢查結果</div>';
+  const s = r.summary;
+  let h = r.ok
+    ? '<div class="banner ok">✓ 格式正確，MedClaw 可以直接用這個資料集訓練。</div>'
+    : '<div class="banner warn">✕ 這個資料集還不能訓練，請先修正下列問題。</div>';
+  if((r.errors||[]).length)
+    h += '<label>必須修正</label><ul style="margin:4px 0 0;padding-left:20px;font-size:13px;color:#c0392b">'
+       + r.errors.map(e=>`<li>${esc(e)}</li>`).join('') + '</ul>';
+  if((r.warnings||[]).length)
+    h += '<label>提醒</label><ul style="margin:4px 0 0;padding-left:20px;font-size:13px;color:#9a5b12">'
+       + r.warnings.map(w=>`<li>${esc(w)}</li>`).join('') + '</ul>';
+  if(s){
+    h += '<table class="kv" style="margin-top:10px">';
+    h += `<tr><td>路徑</td><td><code>${esc(s.path)}</code></td></tr>`;
+    h += `<tr><td>類別數</td><td>${s.num_classes} — ${s.classes.map(esc).join('、') || '—'}</td></tr>`;
+    h += `<tr><td>樣本 (train/val/test)</td><td>${s.n_train} / ${s.n_val} / ${s.n_test}（共 ${s.total}）</td></tr>`;
+    if(s.image_size && s.image_size.min_width)
+      h += `<tr><td>影像尺寸（抽樣 ${s.n_sampled}）</td><td>寬 ${s.image_size.min_width}–${s.image_size.max_width}`
+         + ` × 高 ${s.image_size.min_height}–${s.image_size.max_height}</td></tr>`;
+    h += '</table>';
+    const splits = Object.keys(s.counts||{});
+    if(splits.length && s.classes.length){
+      h += '<table style="margin-top:8px"><tr><th>類別</th>'
+         + splits.map(x=>`<th>${x}</th>`).join('') + '</tr>';
+      s.classes.forEach(c=>{
+        h += `<tr><td>${esc(c)}</td>` + splits.map(x=>`<td>${s.counts[x][c] ?? '—'}</td>`).join('') + '</tr>';
+      });
+      h += '</table>';
+    }
+  }
+  return h;
+}
 function encColor(map, key){
   if(!(key in map)) map[key] = ENC_COLORS[Object.keys(map).length % ENC_COLORS.length];
   return map[key];

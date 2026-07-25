@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}資料集 — M4{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>上傳新資料集</h2>
+  <div class="banner" style="background:#f4f6f9;color:#555">
+    上傳 <b>.zip / .tar / .tar.gz</b> 壓縮檔，解壓後放到
+    <code>{{ data_root }}/&lt;名稱&gt;/</code>，並立即檢查 MedClaw 是否吃得下。<br>
+    需要的結構（壓縮檔多包一層外層目錄也沒關係，會自動攤平）：
+    <pre style="margin:8px 0 0">&lt;資料集&gt;/
+├── train/  &lt;類別A&gt;/*.jpg   &lt;類別B&gt;/*.jpg …
+├── val/    &lt;類別A&gt;/*.jpg   &lt;類別B&gt;/*.jpg …
+└── test/   &lt;類別A&gt;/*.jpg   &lt;類別B&gt;/*.jpg …</pre>
+  </div>
+  <form id="up-form" onsubmit="return false">
+    <div class="row">
+      <div>
+        <label>壓縮檔</label>
+        <input type="file" id="up-file" name="archive" accept=".zip,.tar,.gz,.tgz,.bz2"
+               onchange="upPickName()" style="width:100%;padding:8px 10px;border:1px solid #ccd0d6;border-radius:7px;background:#fff">
+      </div>
+      <div>
+        <label>資料集名稱（data/ 底下的目錄名）</label>
+        <input type="text" id="up-name" name="name" placeholder="留空則用檔名">
+      </div>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;margin:10px 0">
+      <input type="checkbox" id="up-overwrite" style="width:auto"> 覆蓋同名資料集（會先刪除既有目錄）
+    </label>
+    <button type="button" class="primary" id="up-btn" onclick="upload()">上傳並檢查格式</button>
+  </form>
+  <div id="up-bar" class="bar" style="display:none;margin-top:12px"><span style="width:0"></span></div>
+  <div id="up-msg" class="muted" style="margin-top:8px"></div>
+  <div id="up-result" style="margin-top:10px"></div>
+</div>
+
+<div class="card">
+  <h2>檢查既有路徑</h2>
+  <div class="muted">資料集太大不方便上傳時，可以直接放到伺服器上，再用路徑檢查格式。</div>
+  <div class="row" style="align-items:flex-end">
+    <div style="flex:3 1 320px">
+      <label>資料集目錄路徑</label>
+      <input type="text" id="chk-path" placeholder="{{ data_root }}/my_dataset">
+    </div>
+    <div style="flex:0 0 auto"><button type="button" class="ghost" onclick="checkPath()">檢查格式</button></div>
+  </div>
+  <div id="chk-result" style="margin-top:10px"></div>
+</div>
+
+<div class="card">
+  <h2>data/ 底下的資料集
+    <span class="muted" id="ds-count"></span>
+    <button type="button" class="ghost" style="margin:0 0 0 8px;padding:3px 10px;font-size:12px"
+      onclick="reloadList()">重新掃描</button></h2>
+  <div id="ds-list"></div>
+</div>
+{% endblock %}
+
+{% block script %}
+<script>
+const GROUPS0 = {{ dataset_groups|tojson }};
+
+function dsCard(d){
+  const cls = d.classes.map(c =>
+    `<span class="pill running" style="margin:1px 3px 1px 0">${esc(c)} ${(d.counts.train||{})[c] ?? '—'}</span>`).join('');
+  const badge = d.ready ? '<span class="pill done">可訓練</span>'
+                        : `<span class="pill failed">無法訓練：${esc(d.issues.join('、'))}</span>`;
+  return `<div class="nb-cell" data-key="${esc(d.rel_path)}">
+    <div class="h"><span>${esc(d.name)} ${badge}</span>
+      <span class="muted">${d.num_classes} 類 · ${d.total} 張${d.fold!==null?' · fold '+d.fold:''}</span></div>
+    <div class="b">
+      <div class="muted"><code>${esc(d.rel_path)}</code></div>
+      <div style="margin-top:6px">train <b>${d.n_train}</b> / val <b>${d.n_val}</b> / test <b>${d.n_test}</b>
+        · 不平衡比 ${d.imbalance_ratio}</div>
+      <div style="margin-top:6px">${cls}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <a href="./?data=${encodeURIComponent(d.path)}"><button type="button" class="primary">用此資料集開實驗</button></a>
+        <button type="button" class="ghost" onclick="checkOne('${esc(d.path)}', this)">檢查格式</button>
+        <button type="button" onclick="delDataset('${esc(d.path)}','${esc(d.rel_path)}')"
+          style="background:#fdeaea;color:#c0392b">刪除</button>
+      </div>
+      <div class="ds-report" style="margin-top:8px"></div>
+    </div></div>`;
+}
+
+function renderList(groups){
+  const box = document.getElementById('ds-list');
+  let n = 0, html = '';
+  groups.forEach(g => {
+    if (g.name) html += `<h3 style="font-size:13px;color:#3a4a6b;margin:14px 0 8px">${esc(g.name)}</h3>`;
+    g.datasets.forEach(d => { n++; html += dsCard(d); });
+  });
+  box.innerHTML = html || '<div class="muted">data/ 底下還沒有符合 ImageFolder 結構的資料集，先從上方上傳一個吧。</div>';
+  document.getElementById('ds-count').textContent = `（${n} 個）`;
+}
+
+async function reloadList(){
+  const j = await (await fetch('datasets/?refresh=1')).json();
+  if (j.ok) renderList(j.groups);
+}
+
+async function checkOne(path, btn){
+  const box = btn.closest('.b').querySelector('.ds-report');
+  box.innerHTML = '<span class="spin" style="width:14px;height:14px;border-width:2px;vertical-align:-3px"></span> 檢查中…';
+  const fd = new FormData(); fd.append('path', path);
+  try {
+    box.innerHTML = datasetReportHTML(await (await fetch('datasets/validate/', {method:'POST', body:fd})).json());
+  } catch(e){ box.innerHTML = '<div class="banner warn">檢查失敗（連線錯誤）</div>'; }
+}
+
+async function checkPath(){
+  const p = document.getElementById('chk-path').value.trim();
+  const box = document.getElementById('chk-result');
+  if (!p) { box.innerHTML = '<div class="banner warn">請先輸入路徑</div>'; return; }
+  box.innerHTML = '<span class="spin"></span>';
+  const fd = new FormData(); fd.append('path', p);
+  try {
+    box.innerHTML = datasetReportHTML(await (await fetch('datasets/validate/', {method:'POST', body:fd})).json());
+  } catch(e){ box.innerHTML = '<div class="banner warn">檢查失敗（連線錯誤）</div>'; }
+}
+
+async function delDataset(path, rel){
+  if (!confirm(`確定要刪除資料集 ${rel} 嗎？\n\n這會永久刪除 ${path} 整個目錄，無法復原。`)) return;
+  const fd = new FormData(); fd.append('path', path);
+  const j = await (await fetch('datasets/delete/', {method:'POST', body:fd})).json();
+  if (!j.ok) { alert('刪除失敗：' + (j.error || '')); return; }
+  reloadList();
+}
+
+function upPickName(){
+  const f = document.getElementById('up-file').files[0];
+  const name = document.getElementById('up-name');
+  if (f && !name.value)
+    name.value = f.name.replace(/\.(zip|tar|tgz|tbz2|tar\.gz|tar\.bz2)$/i, '');
+}
+
+function upload(){
+  const f = document.getElementById('up-file').files[0];
+  const msg = document.getElementById('up-msg'), res = document.getElementById('up-result');
+  const bar = document.getElementById('up-bar'), btn = document.getElementById('up-btn');
+  res.innerHTML = '';
+  if (!f) { msg.innerHTML = '<span style="color:#c0392b">請先選擇壓縮檔</span>'; return; }
+
+  const fd = new FormData();
+  fd.append('archive', f);
+  fd.append('name', document.getElementById('up-name').value.trim());
+  if (document.getElementById('up-overwrite').checked) fd.append('overwrite', '1');
+
+  const xhr = new XMLHttpRequest();
+  // 用 XHR 而非 fetch: 大檔上傳要有進度; base href 已含代理前綴
+  xhr.open('POST', new URL('datasets/upload/', document.baseURI).href);
+  btn.disabled = true; bar.style.display = ''; bar.firstElementChild.style.width = '0';
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    const pct = e.loaded / e.total * 100;
+    bar.firstElementChild.style.width = pct.toFixed(1) + '%';
+    msg.textContent = `上傳中… ${pct.toFixed(0)}%（${(e.loaded/1048576).toFixed(1)} / ${(e.total/1048576).toFixed(1)} MB）`;
+  };
+  xhr.onload = () => {
+    btn.disabled = false; bar.firstElementChild.style.width = '100%';
+    let j; try { j = JSON.parse(xhr.responseText); }
+    catch(e){ msg.textContent = ''; res.innerHTML = `<div class="banner warn">伺服器回應無法解析（HTTP ${xhr.status}）</div>`; return; }
+    msg.textContent = j.ok ? '完成' : '';
+    let head = '';
+    if (j.rel_path) head += `<div class="muted">已解壓到 <code>data/${esc(j.rel_path)}</code>`
+      + (j.lifted_from ? `（自動攤平壓縮檔內的 <code>${esc(j.lifted_from)}</code> 這層）` : '')
+      + (j.overwritten ? '，已覆蓋原有同名資料集' : '') + '</div>';
+    res.innerHTML = head + datasetReportHTML(j);
+    if (j.rel_path) reloadList();
+  };
+  xhr.onerror = () => {
+    btn.disabled = false; msg.textContent = '';
+    res.innerHTML = '<div class="banner warn">上傳失敗（連線中斷或超過大小上限）</div>';
+  };
+  xhr.send(fd);
+}
+
+renderList(GROUPS0);
+</script>
+{% endblock %}
