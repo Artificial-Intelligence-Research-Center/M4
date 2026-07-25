@@ -42,6 +42,26 @@ advisor:
   allow_code_edit: false                   # 允許 LLM 修改訓練程式 (debug 階段);
                                            # 修改版隔離在 <run_dir>/src/ 執行, 原始程式不動
 
+privacy:                                   # 資料圍欄 — docs/data_firewall_design.md
+  # LLM 永遠看不到影像、檔名、路徑與真實類別名。mode 是巨集, 載入時會覆寫下面的個別
+  # 欄位, 讓「strict 卻同時開 allow_code_edit」這種組合不可能成立。
+  mode: strict                             # strict (預設) | standard | off
+  #   strict   — 資料集/類別假名化; 只回饋結構化 ErrorFacts; **強制** allow_code_edit=false
+  #              (允許改程式 + 回饋 log = 一條完整的資料讀取通道)
+  #   standard — 保留程式修改權, 但原始 log 仍不回饋; 類別名需使用者逐一授權
+  #   off      — 關閉圍欄 (不建議; web UI 會常駐紅色警示)
+  dataset_alias: true                      # 資料集路徑/名稱以假名 DS-xxxxxx 表示
+  class_names: hashed                      # hashed | user_approved | plain
+  revealed_classes: []                     # class_names=user_approved 時使用者勾選的類別名
+  log_feedback: structured                 # none | structured | raw (raw 僅 mode=off 可用)
+  ask_user_when_unsure: true               # 允許決策層提問請使用者回答 (管道 B)
+  allow_free_text_questions: false         # 是否允許自由文字題 (strict 下強制 false)
+  egress_audit: true                       # 每次外送落地 runs/<run>/privacy_audit.jsonl
+  guard_on_user_input: warn                # warn | block | off — 使用者自願貼上的內容
+  salt_file: null                          # 假名 HMAC salt; null = ~/.medclaw/privacy_salt
+  expensive_analyzers_need_consent: true   # near_dup 這類高成本分析需使用者同意
+  scan_filenames: true                     # 出口掃描是否納入抽樣檔名主幹
+
 budget:
   max_wall_clock_min: null                 # 時間預算護欄 (分鐘)
   max_llm_tokens: null

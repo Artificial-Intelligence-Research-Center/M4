@@ -9,9 +9,15 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from .privacy.facts import UserQuestion
+
 
 # ---------------------------------------------------------------------------
 # 資料集分析
+#
+# ⚠ DatasetProfile 屬於**資料平面**, 內含絕對路徑與真實類別名 —
+#   **不得直接進入 prompt**。決策層一律使用 privacy.facts.DatasetFacts
+#   (由 privacy.redact.to_facts 產生)。見 docs/data_firewall_design.md §4。
 # ---------------------------------------------------------------------------
 class DatasetProfile(BaseModel):
     root: str
@@ -142,6 +148,17 @@ class SearchOverride(BaseModel):
     reason: str = ""                     # 覆寫或維持原議的理由 (寫進討論給使用者看)
 
 
+class InfoRequest(BaseModel):
+    """決策層要求補充資料特性的兩條合法管道 (docs/data_firewall_design.md §5/§6)。
+
+    LLM 看不到原始資料; 需要更多特性時只能 (a) 點名執行**已註冊**的分析器, 或
+    (b) 提出問題請使用者親自回答。兩者以外沒有第三條路。
+    """
+    analyses: list[str] = Field(default_factory=list)     # analyzers 註冊表的 key
+    questions: list[UserQuestion] = Field(default_factory=list)
+    reason: str = ""
+
+
 class NextAction(BaseModel):
     stop: bool
     reason: str = ""
@@ -151,3 +168,5 @@ class NextAction(BaseModel):
         "add_auxiliary_task", "adjust_hparams", "edit_code", "none",
     ] = "none"
     next_recipe: Optional[Recipe] = None
+    # 決策同時要求補充資訊 (下一輪生效); 空值 = 不需要
+    info: InfoRequest = Field(default_factory=InfoRequest)

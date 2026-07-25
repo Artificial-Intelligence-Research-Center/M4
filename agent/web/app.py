@@ -22,6 +22,7 @@ import re
 import threading
 import time
 import traceback
+from typing import get_args
 
 from flask import Flask, jsonify, redirect, render_template, request
 
@@ -31,9 +32,15 @@ from .. import (auto_finetune, conversation as convo, dataset_analyzer,
 from ..advisor import HeuristicAdvisor
 from ..config import AgentConfig
 from ..ledger import Ledger
+from ..privacy import egress as egress_mod
+from ..privacy import load_user_facts, save_user_facts
+from ..privacy.facts import Anatomy, Modality, UserAnswer
 from ..run import single_trial
 from ..schemas import EvalConfig
 from ..trainer import gpu_allocatable
+
+_MODALITIES = list(get_args(Modality))
+_ANATOMIES = list(get_args(Anatomy))
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _RUNS = os.path.join(_ROOT, "runs")
@@ -233,6 +240,7 @@ def index():
         presets=presets_mod.names(),
         advisors=["llm", "heuristic", "skill"],   # llm 為預設 (下拉第一個)
         run_names=_run_names(),
+        modalities=_MODALITIES, anatomies=_ANATOMIES,
         **_dataset_ctx(),
     )
 
@@ -470,6 +478,10 @@ def run_full():
     cfg.advisor.preset = f.get("preset", "default")
     cfg.advisor.guidance = f.get("guidance", "").strip()
     cfg.advisor.allow_code_edit = bool(f.get("allow_code_edit"))
+    # 資料圍欄 (docs/data_firewall_design.md): mode 是巨集, strict 會強制關掉
+    # allow_code_edit — 這裡設定順序無所謂, AgentConfig 的 validator 會再套一次。
+    cfg.privacy.mode = f.get("privacy_mode", "strict")
+    cfg = AgentConfig.model_validate(cfg.model_dump())
     cfg.loop.num_drafts = int(f.get("num_drafts", 3) or 3)
     cfg.loop.max_trials = int(f.get("max_trials", 12) or 12)
     cfg.loop.min_trials = int(f.get("min_trials", 6) or 6)
@@ -486,6 +498,8 @@ def run_full():
         cfg.dump_yaml(os.path.join(run_dir, "config.yaml"))
     except Exception:
         pass
+    # 使用者親自提供的資料特性 (模態/部位/類別序數) — LLM 不從路徑猜這些
+    _seed_user_facts(run_dir, f)
     convo.append(run_dir, "system",
                  f"實驗已建立（advisor={cfg.advisor.type}）。正在初始化決策層與挑選 encoder，請稍候…",
                  kind="status")
@@ -691,13 +705,97 @@ def run_status():
         except Exception:
             pass
 
+    # 資料圍欄: 使用者已回答的事實 + 出口稽核摘要 (讓使用者看得到攔截狀況)
+    user_facts = load_user_facts(run_dir).model_dump()
+    audit = egress_mod.read_audit(run_dir)
+    privacy = {
+        "n_egress": sum(1 for a in audit if a.get("kind") == "request"),
+        "n_blocked": sum(1 for a in audit if a.get("verdict") == "blocked"),
+        "n_warned": sum(1 for a in audit if a.get("verdict") == "warn"),
+        "mode": next((a.get("mode") for a in reversed(audit) if a.get("mode")),
+                     None),
+        "recent": [{k: a.get(k) for k in
+                    ("ts", "label", "kind", "verdict", "violations", "n_chars")}
+                   for a in audit[-40:]],
+    }
+
     return jsonify({"ok": True, "run": run, "trials": trials,
                     "current": current, "report": report, "n_done": len(trials),
                     "config": config_text, "running_trial": running_trial,
                     "conversation": convo.read(run_dir),
                     "stopped": convo.stop_requested(run_dir)[0],
-                    "qa_stream": qa_stream,
+                    "qa_stream": qa_stream, "user_facts": user_facts,
+                    "privacy": privacy,
                     "llm_calls": llm_calls, "search_tree": search_tree})
+
+
+def _seed_user_facts(run_dir: str, form) -> None:
+    """把「開始實驗」表單上的資料特性寫進 user_facts.json (管道 B 的起點)。
+
+    modality / anatomy 刻意由使用者指定 — 舊版是從資料集路徑關鍵字猜 (見
+    dataset_analyzer._modality_hint)，那既不準又等於把路徑內容送進決策。
+    """
+    uf = load_user_facts(run_dir)
+    ts = time.time()
+    picked: list[tuple[str, str]] = []
+    if (m := form.get("modality", "").strip()) in _MODALITIES:
+        uf.modality = m
+        picked.append(("modality", m))
+    if (a := form.get("anatomy", "").strip()) in _ANATOMIES:
+        uf.anatomy = a
+        picked.append(("anatomy", a))
+    if (o := form.get("class_ordinal", "").strip()) in ("0", "1"):
+        uf.class_ordinal = (o == "1")
+        picked.append(("class_ordinal", "true" if o == "1" else "false"))
+    for key, value in picked:
+        uf.answers.append(UserAnswer(key=key, question="（建立實驗時填寫）",
+                                     value=value, ts=ts))
+    if picked:
+        save_user_facts(run_dir, uf)
+
+
+@app.route("/answer", methods=["POST"])
+def answer_questions():
+    """使用者回答決策層的提問 (管道 B) — 寫入 user_facts.json, 下一輪決策就會看到。
+
+    這裡的內容是使用者**自願**提供的, 會原文進入 prompt; 前端已明確告知。
+    """
+    run = request.form.get("run", "").strip()
+    run_dir = os.path.realpath(os.path.join(_RUNS, run))
+    if not run or not run_dir.startswith(os.path.realpath(_RUNS) + os.sep) \
+            or not os.path.isdir(run_dir):
+        return jsonify({"ok": False, "error": "無效的 run"}), 400
+    try:
+        items = json.loads(request.form.get("answers", "[]"))
+    except Exception:
+        return jsonify({"ok": False, "error": "answers 不是合法 JSON"}), 400
+    if not isinstance(items, list) or not items:
+        return jsonify({"ok": False, "error": "沒有任何回答"}), 400
+
+    uf = load_user_facts(run_dir)
+    ts = time.time()
+    lines = []
+    for it in items:
+        key = str(it.get("key", "")).strip()
+        value = str(it.get("value", "")).strip()
+        if not key or not value:
+            continue
+        uf.answers.append(UserAnswer(key=key, question=str(it.get("question", "")),
+                                     value=value[:500], ts=ts))
+        # 結構化欄位: 直接映射, 讓 DatasetFacts 也帶得到
+        if key == "modality" and value in _MODALITIES:
+            uf.modality = value
+        elif key == "anatomy" and value in _ANATOMIES:
+            uf.anatomy = value
+        elif key == "class_ordinal":
+            uf.class_ordinal = value.lower() in ("true", "1", "是", "yes")
+        lines.append(f"・{it.get('question') or key}：{value}")
+    if not lines:
+        return jsonify({"ok": False, "error": "沒有任何有效回答"}), 400
+    save_user_facts(run_dir, uf)
+    convo.append(run_dir, "user", "我的回答：\n" + "\n".join(lines),
+                 kind="user_msg")
+    return jsonify({"ok": True, "n": len(lines)})
 
 
 @app.route("/discuss", methods=["POST"])

@@ -1,7 +1,14 @@
 # M4 自動微調 Agent
 
 設計文件：[`../docs/auto_finetune_agent_design.md`](../docs/auto_finetune_agent_design.md)
+資料圍欄：[`../docs/data_firewall_design.md`](../docs/data_firewall_design.md)
 決策層 skill 模板：[`../.claude/skills/finetune-advisor/`](../.claude/skills/finetune-advisor/)
+
+> **資料圍欄 (Data Firewall)**：LLM 永遠看不到使用者的輸入資料 —— 影像、檔名、路徑、
+> 真實類別名都不會進入 prompt。決策層看到的是假名化後的 `DatasetFacts`；它需要知道
+> 資料特性時，只能 (a) 點名執行 `agent/analyzers/` 裡**事先寫好**的分析器，或
+> (b) 提出問題請使用者親自回答。所有 API 呼叫必須經 `agent/privacy/egress.py`，
+> `privacy/sentinel.py` 會在執行期擋下任何繞道。預設 `privacy.mode: strict`。
 
 給定資料集與預測需求，自動完成 encoder 選擇 → Recipe 組合 → 訓練 → 評估 →
 改良迭代，並回報效能。Agent 是既有 `main_finetune.py` pipeline 的
@@ -20,11 +27,27 @@
 | **P6** 任務擴充 | `TaskTemplate` 目錄 (`fundus_classification` + `regression` 抽象) + `suggest_task_templates` | ✅ |
 | **P7** skill 接口 | `SkillAdvisor` (file-based handoff, 介面同 LLM/Heuristic, 可整組抽換) | ✅ |
 
+## 資料圍欄進度 (`../docs/data_firewall_design.md` §12)
+
+| 階段 | 內容 | 狀態 |
+| --- | --- | --- |
+| **P0** 圍欄骨架 | `privacy/` 模組、`DatasetFacts`、`egress` 單一出口、`sentinel` 執行期哨兵、`PrivacyConfig` + mode 巨集、canary 測試 | ✅ |
+| **P1** 分析器通道 | `analyzers/` 註冊表 (5 個分析器) + `error_extract` 結構化失敗事實 + `request_analysis` 回路 | ✅ |
+| **P2** 詢問使用者 | `UserQuestion` 契約、`kind="question"` 表單卡、`user_facts.json`、modality/anatomy 下拉 | ✅ |
+| **P3** 可證明性 UI | 獨立 `/privacy` 分頁（逐筆 payload 全文、假名對照表） | ⬜ 工作台已有稽核摘要列 |
+| **P4** standard 模式 | `code_edits` AST 檢查器、類別名逐一授權流程 | ⬜ |
+| **P5** SkillAdvisor 對齊 | 交握 payload 改用 facts + 寫檔前 guard | ✅ |
+
+測試：`python -m tests.privacy.run_all`（19 項；canary 資料集 + 哨兵 + 出口掃描 +
+schema 無自由字串 + mode 巨集）。
+
 ## 模組對應
 
 | 檔案 | 角色 |
 | --- | --- |
-| `schemas.py` | 資料契約 (§6)：`DatasetProfile / EncoderChoice / Recipe / TrialResult / NextAction / EvalConfig` |
+| `privacy/` | **資料圍欄**：`facts`（唯一可進 prompt 的契約）/ `redact`（消毒 + 出口掃描）/ `egress`（唯一出口 + 稽核）/ `sentinel`（執行期擋繞道）/ `alias`（假名對照）/ `context` |
+| `analyzers/` | **管道 A**：LLM 可點名執行的分析器註冊表（`class_balance` / `image_stats` / `corrupt_files` / `split_leakage` / `near_dup`）+ `error_extract`（log → `ErrorFacts`） |
+| `schemas.py` | 資料契約 (§6)：`DatasetProfile / EncoderChoice / Recipe / TrialResult / NextAction / InfoRequest / EvalConfig`。⚠ `DatasetProfile` 屬資料平面，不得直接進 prompt |
 | `config.py` | `AgentConfig` — YAML 設定檔契約與載入 (§7) |
 | `dataset_analyzer.py` | §5.1 掃 ImageFolder → `DatasetProfile` |
 | `encoder_registry.py` | §5.3 encoder 目錄 (`EncoderCard`) |

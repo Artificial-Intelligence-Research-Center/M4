@@ -40,6 +40,24 @@ def _load_profile(run_dir: str) -> DatasetProfile | None:
         return None
 
 
+def _load_analyses(run_dir: str) -> list:
+    """讀回本 run 已執行過的分析器結果 (供問答時一併參考)。"""
+    from .privacy.facts import AnalysisFacts
+    out = []
+    d = os.path.join(run_dir, "analysis")
+    if not os.path.isdir(d):
+        return out
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, name), encoding="utf8") as f:
+                out.append(AnalysisFacts.model_validate(json.load(f)["facts"]))
+        except Exception:
+            continue
+    return out
+
+
 def _load_tree(run_dir: str) -> dict | None:
     try:
         with open(os.path.join(run_dir, "search_tree.json"), encoding="utf8") as f:
@@ -91,11 +109,23 @@ def answer(run_dir: str, question: str) -> dict:
         return {"ok": False, "why": f"advisor={cfg.advisor.type} (QA 需 llm)"}
 
     with _run_lock(run_dir):
+        from . import analyzers
         from .llm_advisor import LLMAdvisor  # 延後匯入 (無 anthropic 時不炸整個 web)
+        from .loop_controller import _data_root_of
+        from .privacy import PrivacyContext
+
         adv = LLMAdvisor(model=cfg.advisor.model, guidance=cfg.advisor.guidance)
         adv.log_path = os.path.join(run_dir, "llm_calls.jsonl")  # QA 呼叫一併落地
+        adv.analyzer_catalog = analyzers.catalog()
 
         profile = _load_profile(run_dir)
+        # 資料圍欄: 問答 agent 與決策層走同一套消毒/出口/稽核 (見 docs/data_firewall_design.md)
+        adv.privacy = PrivacyContext.build(
+            cfg.privacy, profile, run_dir=run_dir,
+            data_root=_data_root_of(cfg.data_path),
+            exempt_text=adv._registry_context(),
+            guidance=cfg.advisor.guidance)
+        adv.analyses = _load_analyses(run_dir)
         history = [t for t in Ledger(run_dir).history()
                    if not (t.trial_id or "").endswith("_bestfold")]
         tree = _load_tree(run_dir)

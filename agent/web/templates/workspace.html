@@ -31,6 +31,8 @@
           style="margin:0;background:#f4f5f7;color:#c0392b;padding:8px 10px;flex:0 0 auto">🗑</button>
       </div>
       {% if not run_names %}<div class="muted" style="margin-top:8px">尚無 run，先在右方開一個完整流程。</div>{% endif %}
+      <div id="privacy-bar" style="display:none;margin-top:8px;font-size:11px;padding:5px 8px;
+           border-radius:6px;border:1px solid #cfe0fb;background:#f4f8ff"></div>
       <div id="chat-box" data-zoom-target style="height:54vh;overflow-y:auto;border:1px solid #e3e6ea;
            border-radius:8px;padding:10px;background:#fbfcfe;margin-top:8px">
         <div class="muted">開始「完整流程」後，LLM 每輪的檢視與決策會出現在這裡；你可以隨時留言引導。</div>
@@ -74,10 +76,32 @@
           <div><label title="至少完成這麼多輪才允許 patience 提早停">min_trials（至少輪數）</label><input type="text" name="min_trials" value="6"></div>
           <div><label title="連續這麼多輪 improve/resume 無提升才停；draft/debug 不計">patience（無提升容忍）</label><input type="text" name="patience" value="4"></div>
         </div>
+        <div class="row">
+          <div><label title="LLM 看不到任何原始資料；strict 另外禁止修改訓練程式，避免經由 log 回讀資料">資料圍欄</label>
+            <select name="privacy_mode" id="privacy-mode" onchange="onPrivacyMode()">
+              <option value="strict">strict（預設：LLM 完全看不到資料，且不可改程式）</option>
+              <option value="standard">standard（可改程式；原始 log 仍不回饋給 LLM）</option>
+              <option value="off">off（關閉圍欄，不建議）</option>
+            </select></div>
+          <div><label title="LLM 不從資料夾名稱猜測，由你指定">影像模態</label>
+            <select name="modality"><option value="">未指定</option>
+              {% for m in modalities %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select></div>
+          <div><label>拍攝部位</label>
+            <select name="anatomy"><option value="">未指定</option>
+              {% for a in anatomies %}<option value="{{ a }}">{{ a }}</option>{% endfor %}</select></div>
+          <div><label title="類別之間是否有程度順序（例：DR 分級 0-4）">類別是否有序</label>
+            <select name="class_ordinal"><option value="">未指定</option>
+              <option value="1">是（有序）</option><option value="0">否（名目）</option></select></div>
+        </div>
+        <div id="privacy-note" class="muted" style="font-size:12px;margin:-2px 0 8px">
+          資料圍欄：LLM 看不到影像、檔名、路徑與真實類別名（資料集以假名 <code>DS-…</code>、類別以 <code>C0…Cn</code> 表示）。
+          它需要資料特性時，只能點名執行本地分析器，或直接問你。
+        </div>
         <label>引導方向 (guidance)</label>
         <textarea name="guidance" rows="2" placeholder="例：資料量小且不平衡，優先醫療 DAP encoder + focal loss；先 linear probe 快速篩選。"></textarea>
-        <label style="display:flex;align-items:center;gap:6px;margin:8px 0">
-          <input type="checkbox" name="allow_code_edit" value="1" style="width:auto">
+        <div class="muted" style="font-size:11px;margin:-4px 0 6px">⚠ 這段文字會原文送到 Claude API，請勿貼上病人資訊或檔案路徑。</div>
+        <label style="display:flex;align-items:center;gap:6px;margin:8px 0" id="code-edit-label">
+          <input type="checkbox" name="allow_code_edit" value="1" style="width:auto" id="allow-code-edit" disabled>
           允許 LLM 修改訓練程式（除錯失敗 trial 時，以及 improve 階段改良 main_finetune.py；修改版隔離在 run 目錄下執行，原始程式不會被改動）
         </label>
         <button type="submit" class="primary">開始完整流程</button>
@@ -438,7 +462,8 @@ async function pollRunStatus(){
   }
   reconcile(nb, html);   // 逐格更新, 不整頁重建 → 不閃爍、保留展開/捲動
   applyCellUI(nb);       // 重繪後重套用各格的縮放層級 / 全螢幕狀態
-  renderChat(j.conversation||[], j.stopped, j.qa_stream);
+  renderChat(j.conversation||[], j.stopped, j.qa_stream, j.user_facts);
+  renderPrivacy(j.privacy);
   _loadedRun=sel.value; _loadbar(false);
   // QA streaming 中: 加速輪詢 (0.7s) 讓文字流暢滾出; 結束後回到 4s 節奏
   clearTimeout(window._qaFastT);
@@ -452,19 +477,112 @@ async function pollRunStatus(){
   }catch(_){}
 })();
 // ---- 聊天 ----
+// 資料圍欄: strict 模式不允許 LLM 改訓練程式 (寫入權 + log 回讀 = 完整讀取通道)
+function onPrivacyMode(){
+  const m=document.getElementById('privacy-mode'), cb=document.getElementById('allow-code-edit');
+  const note=document.getElementById('privacy-note'), lab=document.getElementById('code-edit-label');
+  if(!m||!cb) return;
+  const strict = m.value==='strict';
+  cb.disabled = strict;
+  if(strict) cb.checked=false;
+  if(lab) lab.style.opacity = strict?0.5:1;
+  if(note){
+    if(m.value==='off'){
+      note.innerHTML='<span style="color:#b42318">⚠ 圍欄已關閉：資料集路徑、真實類別名與原始訓練 log 都會送到 Claude API。</span>';
+    }else if(m.value==='standard'){
+      note.innerHTML='standard：LLM 仍看不到影像與路徑，但可以修改 <code>main_finetune.py</code>。原始 log 不會回饋給它。';
+    }else{
+      note.innerHTML='資料圍欄：LLM 看不到影像、檔名、路徑與真實類別名（資料集以假名 <code>DS-…</code>、類別以 <code>C0…Cn</code> 表示）。它需要資料特性時，只能點名執行本地分析器，或直接問你。';
+    }
+  }
+}
+document.addEventListener('DOMContentLoaded', onPrivacyMode);
+
+// 出口稽核摘要: 這個 run 送出過幾次、有沒有被圍欄攔下來
+function renderPrivacy(p){
+  const bar=document.getElementById('privacy-bar'); if(!bar) return;
+  if(!p || !p.n_egress){ bar.style.display='none'; return; }
+  bar.style.display='';
+  const mode=p.mode||'strict';
+  let html=`🔒 資料圍欄 <b>${esc(mode)}</b>　·　已送出 ${p.n_egress} 次`;
+  if(p.n_blocked) html+=`　·　<span style="color:#b42318">攔截 ${p.n_blocked} 次</span>`;
+  if(p.n_warned)  html+=`　·　<span style="color:#b7791f">警示 ${p.n_warned} 次</span>`;
+  const bad=(p.recent||[]).filter(a=>a.verdict==='blocked').slice(-1)[0];
+  if(bad && (bad.violations||[]).length){
+    html+=`<div style="margin-top:3px;color:#b42318">最近一次攔截（${esc(bad.label||'')}）：`
+        + bad.violations.slice(0,3).map(v=>esc(v.rule)).join('、')+`</div>`;
+  }
+  bar.innerHTML=html;
+}
+
+// 決策層提問 (管道 B): 把 kind=question 的訊息渲染成表單卡, 讓使用者自己填答案
+let _answered=new Set();
+function questionCard(e){
+  const qs=e.questions||[];
+  if(!qs.length) return '';
+  const cid='qc'+Math.round((e.ts||0)*1000);
+  const rows=qs.map((q,i)=>{
+    const key=esc(q.key||('q'+i)), done=_answered.has(q.key);
+    let input;
+    if(done){
+      input=`<span style="color:#2f7a4a">已回答</span>`;
+    }else if(q.kind==='bool'){
+      input=`<select data-k="${key}"><option value="true">是</option><option value="false">否</option></select>`;
+    }else if(q.kind==='choice'){
+      input=`<select data-k="${key}">`+(q.options||[]).map(o=>`<option>${esc(o)}</option>`).join('')+`</select>`;
+    }else if(q.kind==='multi'){
+      input=`<select data-k="${key}" multiple size="${Math.min(4,(q.options||[]).length||2)}">`
+           +(q.options||[]).map(o=>`<option>${esc(o)}</option>`).join('')+`</select>`;
+    }else if(q.kind==='number'){
+      input=`<input type="number" data-k="${key}" style="max-width:120px">`;
+    }else{
+      input=`<input type="text" data-k="${key}" maxlength="200" placeholder="請避免填入病人資訊或檔案路徑">`;
+    }
+    return `<div style="margin:6px 0" data-q="${esc(q.question||'')}">`
+      +`<div style="font-size:12px">${esc(q.question||key)}${q.blocking?' <b style="color:#b42318">（實驗等待中）</b>':''}</div>`
+      +(q.why?`<div class="muted" style="font-size:11px">${esc(q.why)}</div>`:'')
+      +`<div style="margin-top:3px">${input}</div></div>`;
+  }).join('');
+  const pending=qs.some(q=>!_answered.has(q.key));
+  return `<div id="${cid}" style="margin-top:6px;padding:8px;border:1px dashed #cfe0fb;border-radius:8px;background:#fff">`
+    + rows
+    + (pending?`<button onclick="submitAnswers('${cid}')" class="primary" style="margin-top:6px">送出回答</button>`
+              +`<div class="muted" style="font-size:11px;margin-top:4px">⚠ 你填的內容會原文送到 Claude API。</div>`:'')
+    + `</div>`;
+}
+async function submitAnswers(cid){
+  const box=document.getElementById(cid), run=document.getElementById('rs-run');
+  if(!box||!run||!run.value) return;
+  const out=[];
+  box.querySelectorAll('[data-k]').forEach(el=>{
+    const q=el.closest('[data-q]'); const question=q?q.getAttribute('data-q'):'';
+    let v;
+    if(el.multiple){ v=Array.from(el.selectedOptions).map(o=>o.value).join(', '); }
+    else { v=el.value; }
+    if(v!==undefined && String(v).trim()!=='') out.push({key:el.getAttribute('data-k'), question, value:String(v)});
+  });
+  if(!out.length){ alert('請至少回答一題'); return; }
+  const fd=new FormData(); fd.append('run', run.value); fd.append('answers', JSON.stringify(out));
+  try{ const r=await fetch('answer/',{method:'POST',body:fd}); const j=await r.json();
+       if(!j.ok){ alert('送出失敗：'+(j.error||'')); return; } }catch(e){ alert('送出失敗'); return; }
+  _chatSig='';   // 強制重繪
+  pollRunStatus();
+}
+
 const WHO={llm:'🤖 LLM', user:'🧑 你', system:'⚙️ 系統'};
 const KIND_LABELS={qa:'💬 問答', review:'檢視', decision:'決策', status:'狀態',
-                   final:'結束', user_msg:'留言'};
+                   final:'結束', user_msg:'留言', question:'❓ 需要你回答'};
 function chatStyle(role){
   if(role==='user') return 'align-self:flex-end;background:#e7f6ec;border:1px solid #b7e4c7';
   if(role==='llm')  return 'align-self:flex-start;background:#eaf1fd;border:1px solid #cfe0fb';
   return 'align-self:center;background:#f4f5f7;border:1px solid #e3e6ea;color:#555;font-size:12px';
 }
 let _chatSig='';
-function renderChat(entries, stopped, qa){
+function renderChat(entries, stopped, qa, userFacts){
   const box=document.getElementById('chat-box'); if(!box) return;
+  _answered = new Set(((userFacts||{}).answers||[]).map(a=>a.key));
   const sig = entries.length+'|'+(entries.length?entries[entries.length-1].ts:'')+'|'+stopped
-            +'|'+(qa?('s'+(qa.text||'').length):'');
+            +'|'+(qa?('s'+(qa.text||'').length):'')+'|a'+_answered.size;
   if(sig===_chatSig) return;   // 內容沒變就不重建 → 不閃爍
   _chatSig=sig;
   if(!entries.length && !qa){ box.innerHTML='<div class="muted">尚無討論。開始完整流程後會出現 LLM 的檢視與決策。</div>'; return; }
@@ -483,7 +601,8 @@ function renderChat(entries, stopped, qa){
     const r=e.role||'system';
     return `<div style="max-width:90%;margin:5px 0;padding:7px 10px;border-radius:10px;${chatStyle(r)}">`
       +`<div style="font-size:10px;opacity:.7">${WHO[r]||r}${e.kind?(' · '+(KIND_LABELS[e.kind]||esc(e.kind))):''}${e.round!=null?(' · round '+e.round):''}</div>`
-      +`<div style="font-size:13px;white-space:pre-wrap">${esc(e.text||'')}</div></div>`;
+      +`<div style="font-size:13px;white-space:pre-wrap">${esc(e.text||'')}</div>`
+      +(e.kind==='question'?questionCard(e):'')+`</div>`;
   }).join('') + streamHtml
     + (stopped?'<div class="banner warn" style="margin-top:6px">已要求中斷實驗。</div>':'');
   if(atBottom || qa) box.scrollTop = box.scrollHeight;

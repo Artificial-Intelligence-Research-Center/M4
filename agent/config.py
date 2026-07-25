@@ -19,6 +19,7 @@
       max_debug_depth: 2
     advisor: { type: llm, model: claude-opus-4-8, allow_code_edit: false }
     budget: { max_wall_clock_min: null }
+    privacy: { mode: strict }     # 資料圍欄; 見 docs/data_firewall_design.md
 
 CLI: python -m agent.auto_finetune --config config.yaml
 """
@@ -28,7 +29,7 @@ import os
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .schemas import EvalConfig
 
@@ -92,6 +93,26 @@ class GpuOptConfig(BaseModel):
     cache_short_side: int = 512    # 快取短邊 (~2×input_size, 留 RandomResizedCrop 餘裕)
 
 
+class PrivacyConfig(BaseModel):
+    """資料圍欄 (docs/data_firewall_design.md §9)。
+
+    `mode` 是巨集: 載入時會覆寫個別欄位, 讓「寫了 strict 卻同時開 code_edit」
+    這種組合在型別層就不可能成立。
+    """
+    mode: Literal["strict", "standard", "off"] = "strict"
+    dataset_alias: bool = True              # 資料集路徑/名稱以假名替代
+    class_names: Literal["hashed", "user_approved", "plain"] = "hashed"
+    revealed_classes: list[str] = Field(default_factory=list)  # user_approved 時使用者勾選的真實類別名
+    log_feedback: Literal["none", "structured", "raw"] = "structured"
+    allow_free_text_questions: bool = False  # 是否允許 LLM 向使用者要自由文字
+    ask_user_when_unsure: bool = True        # 允許 LLM 提出問題請使用者回答
+    egress_audit: bool = True
+    guard_on_user_input: Literal["warn", "block", "off"] = "warn"
+    salt_file: Optional[str] = None          # 預設 ~/.medclaw/privacy_salt
+    expensive_analyzers_need_consent: bool = True
+    scan_filenames: bool = True              # 出口掃描是否納入抽樣檔名主幹
+
+
 class AgentConfig(BaseModel):
     data_path: str
     task: dict = Field(default_factory=lambda: {"type": "classification"})
@@ -102,9 +123,35 @@ class AgentConfig(BaseModel):
     advisor: AdvisorConfig = Field(default_factory=AdvisorConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     gpu: GpuOptConfig = Field(default_factory=GpuOptConfig)
+    privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     device: int = 0
     dry_run: bool = False
     stream_logs: bool = True   # True: 子程序輸出即時顯示於 console + 寫檔; False: 只寫檔
+
+    @model_validator(mode="after")
+    def _apply_privacy_mode(self) -> "AgentConfig":
+        """mode 巨集: strict 強制最嚴; standard 只夾住會造成洩漏的組合; off 不干預。
+
+        關鍵在 `advisor.allow_code_edit` — 允許 LLM 改訓練程式 + 把 log 回饋給 LLM,
+        兩者合起來就是一條完整的資料讀取通道 (設計文件 §8)。strict 直接拿掉寫入能力;
+        standard 保留寫入但強制切斷 raw log 回讀。
+        """
+        p = self.privacy
+        if p.mode == "strict":
+            p.dataset_alias = True
+            p.class_names = "hashed"
+            p.log_feedback = "structured" if p.log_feedback != "none" else "none"
+            p.allow_free_text_questions = False
+            self.advisor.allow_code_edit = False
+        elif p.mode == "standard":
+            p.dataset_alias = True
+            if p.class_names == "plain":
+                p.class_names = "user_approved"
+            if p.log_feedback == "raw":
+                p.log_feedback = "structured"
+        if p.class_names != "user_approved":
+            p.revealed_classes = []
+        return self
 
     @classmethod
     def load(cls, path: str) -> "AgentConfig":

@@ -22,19 +22,35 @@ import re
 import time
 from typing import Optional
 
-from . import (conversation, dataset_analyzer, encoder_registry as reg,
-               evaluator as ev, log_curves, metric_registry as mreg, presets,
-               report as report_mod)
+from . import (analyzers, conversation, dataset_analyzer,
+               encoder_registry as reg, evaluator as ev, log_curves,
+               metric_registry as mreg, presets, report as report_mod)
+from .analyzers import error_extract
 from .config import AgentConfig
 from .journal import Journal, Node
 from .ledger import Ledger
-from .schemas import (DatasetProfile, EncoderChoice, EvalConfig, Recipe,
-                      TrialResult)
+from .privacy import PrivacyContext, load_user_facts
+from .privacy.facts import ErrorFacts, UserQuestion
+from .schemas import (DatasetProfile, EncoderChoice, EvalConfig, InfoRequest,
+                      Recipe, TrialResult)
 from .trainer import run_trial
+
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _better(a: float, b: Optional[float]) -> bool:
     return b is None or a > b
+
+
+def _data_root_of(data_path: str) -> str:
+    """出口掃描要用的資料根目錄 (用來推出「哪些目錄名屬於資料集識別」)。"""
+    repo_data = os.path.realpath(os.path.join(_REPO_ROOT, "data"))
+    real = os.path.realpath(data_path)
+    if real == repo_data or real.startswith(repo_data + os.sep):
+        return repo_data
+    parent = os.path.dirname(real)
+    return os.path.dirname(parent) or parent
 
 
 def discover_folds(data_path: str) -> list[str]:
@@ -70,9 +86,148 @@ class LoopController:
         self._last_gpu_stats: dict = {}  # 最近一個 trial 的 GPU 取樣 (draft 的 boost 依據)
         self._resume_fails = 0           # 連續無提升的 resume 次數 (自適應停用)
         self._resume_disabled = False    # 連續失敗達上限後本 run 停用 resume
+        # 資料圍欄 (docs/data_firewall_design.md): 需要 profile 才建得起來, 見 _setup_privacy
+        self.privacy: Optional[PrivacyContext] = None
+        self._ds_tag = "ds"              # trial_id 用的資料集假名 (不含真實名稱)
+        self._asked: set[str] = set()    # 已經問過使用者的問題 key (不重複問)
         # LLM 完整 prompt/回應落地 (LLMAdvisor 支援時)
         if hasattr(advisor, "log_path"):
             advisor.log_path = os.path.join(self.run_dir, "llm_calls.jsonl")
+
+    # ---- 資料圍欄 -------------------------------------------------------
+    def _setup_privacy(self, profile: DatasetProfile) -> PrivacyContext:
+        """建立 PrivacyContext 並掛到決策層上。
+
+        決策層從這一刻起才拿得到資料集描述 — 而且只拿得到 DatasetFacts (假名化、
+        無路徑、無真實類別名)。分析器目錄一併交給它, 讓它知道可以點名哪些程式。
+        """
+        exempt = ""
+        if hasattr(self.advisor, "_registry_context"):
+            try:
+                exempt = self.advisor._registry_context()
+            except Exception:
+                exempt = ""
+        n_folds = len(discover_folds(self.cfg.data_path))
+        ctx = PrivacyContext.build(
+            self.cfg.privacy, profile, run_dir=self.run_dir,
+            data_root=_data_root_of(self.cfg.data_path),
+            exempt_text=exempt, guidance=self.cfg.advisor.guidance,
+            n_folds=n_folds if n_folds > 1 else None)
+        self.privacy = ctx
+        self._ds_tag = re.sub(r"[^\w.-]+", "_", ctx.alias.dataset_ref)
+        if hasattr(self.advisor, "privacy"):
+            self.advisor.privacy = ctx
+        if hasattr(self.advisor, "analyzer_catalog"):
+            self.advisor.analyzer_catalog = analyzers.catalog()
+        return ctx
+
+    def _fold_tag(self, fold: str) -> str:
+        """某個 fold 的假名 (多 fold 彙整時的 trial_id 用)。"""
+        from .privacy import alias as alias_mod
+        salt = alias_mod.load_salt(self.cfg.privacy.salt_file)
+        return re.sub(r"[^\w.-]+", "_", alias_mod.dataset_ref(fold, salt))
+
+    def _analysis_dir(self) -> str:
+        return os.path.join(self.run_dir, "analysis")
+
+    # ---- 管道 A: 執行 LLM 點名的分析器 ---------------------------------
+    def _run_analyses(self, keys: list[str], k: Optional[int] = None) -> None:
+        """執行註冊表內的分析器; 目錄外的 key 一律拒絕並告知使用者。"""
+        adv_list = getattr(self.advisor, "analyses", None)
+        if adv_list is None:
+            return
+        done = {a.key for a in adv_list}
+        for key in dict.fromkeys(keys):       # 去重且保序
+            if key in done:
+                continue
+            a = analyzers.REGISTRY.get(key)
+            if a is None:
+                self._say("system", f"決策層要求執行分析器「{key}」，但它不在註冊表中，"
+                          f"已拒絕（可用: {'、'.join(analyzers.REGISTRY)}）。",
+                          kind="status", round=k)
+                continue
+            if (a.needs_consent
+                    and self.cfg.privacy.expensive_analyzers_need_consent
+                    and not self._has_consent(key)):
+                self._ask_user([UserQuestion(
+                    key=f"consent:{key}", kind="bool", blocking=False,
+                    question=f"是否同意執行分析器「{key}」？（{a.description}）",
+                    why=f"這是高成本分析（cost={a.cost}），需要你同意才會跑。")], k)
+                continue
+            self._say("system", f"執行分析器 {key}（{a.cost}）…", kind="status", round=k)
+            facts = analyzers.run_cached(key, self.cfg.data_path,
+                                         cache_dir=self._analysis_dir())
+            adv_list.append(facts)
+            if facts.ok:
+                self._say("system", f"分析器 {key} 完成，結果已提供給決策層："
+                          f"{json.dumps(facts.result, ensure_ascii=False)[:400]}",
+                          kind="status", round=k)
+            else:
+                self._say("system", f"分析器 {key} 執行失敗：{facts.error}",
+                          kind="status", round=k)
+
+    def _has_consent(self, key: str) -> bool:
+        uf = load_user_facts(self.run_dir)
+        v = (uf.answer_for(f"consent:{key}") or "").strip().lower()
+        return v in ("true", "yes", "是", "1", "同意")
+
+    # ---- 管道 B: 請使用者親自回答 --------------------------------------
+    def _ask_user(self, questions: list[UserQuestion],
+                  k: Optional[int] = None) -> None:
+        """把問題貼進討論頻道 (kind=question); web UI 會渲染成表單卡。"""
+        if not self.cfg.privacy.ask_user_when_unsure:
+            return
+        fresh = [q for q in questions if q.key and q.key not in self._asked]
+        if not fresh:
+            return
+        answered = load_user_facts(self.run_dir).answered_keys()
+        fresh = [q for q in fresh if q.key not in answered]
+        if not fresh:
+            return
+        for q in fresh:
+            self._asked.add(q.key)
+        conversation.append(
+            self.run_dir, "llm",
+            "我需要一些只有你知道的資料特性（我看不到原始資料）：\n"
+            + "\n".join(f"・{q.question}" for q in fresh),
+            kind="question", round=k,
+            questions=[q.model_dump() for q in fresh])
+
+    def _await_answers(self, keys: set[str], timeout_s: float = 1800.0,
+                       poll_s: float = 5.0) -> bool:
+        """等待使用者回答 (blocking 問題)。逾時或使用者中斷即放棄, 不卡死實驗。"""
+        if not keys:
+            return True
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            if keys <= load_user_facts(self.run_dir).answered_keys():
+                return True
+            stop, _ = conversation.stop_requested(self.run_dir)
+            if stop:
+                return False
+            time.sleep(poll_s)
+        return False
+
+    def _handle_info(self, info: Optional[InfoRequest],
+                     k: Optional[int] = None) -> None:
+        """處理決策層的資訊需求 — 兩條合法管道 (分析器 / 問使用者)。"""
+        if not info:
+            return
+        if info.analyses:
+            self._run_analyses(info.analyses, k)
+        if info.questions:
+            self._ask_user(info.questions, k)
+            blocking = {q.key for q in info.questions if q.blocking}
+            if blocking:
+                self._say("system",
+                          f"等待你回答 {len(blocking)} 個問題後再繼續"
+                          f"（最多等 30 分鐘，逾時會用保守預設繼續）。",
+                          kind="status", round=k)
+                if not self._await_answers(blocking):
+                    self._say("system", "未取得回覆，改用保守預設繼續。",
+                              kind="status", round=k)
+        if self.privacy is not None:
+            self.privacy.refresh_user_facts()
 
     # ---- 護欄 ----------------------------------------------------------
     def _budget_exhausted(self) -> bool:
@@ -355,21 +510,38 @@ class LoopController:
 
     def _debug_recipe(self, profile: DatasetProfile, encoder,
                       node: Node) -> Optional[Recipe]:
-        """除錯 (對應 aideml debug 階段): 讀失敗 trial 的 log 尾端, 交給 Advisor
-        提出修正 Recipe。advisor=llm 且 allow_code_edit=True 時, LLM 可一併修改
-        訓練程式 — 修改版由 code_workspace 放在 <run_dir>/src/ 之下執行,
-        原始程式不會被修改。回 None = 無從修起, 放棄該分支。"""
-        tail = ""
+        """除錯 (對應 aideml debug 階段): 把失敗 trial 的 log 交給 **本地** 抽取器
+        產生 ErrorFacts, 再交給 Advisor 提出修正 Recipe。
+
+        ⚠ 資料圍欄: 原始 log 含 `Namespace(... data_path='/…')` 與 traceback 中的
+        影像路徑, **不會**交給 LLM (docs/data_firewall_design.md §8.1)。只有在
+        privacy.log_feedback="raw" (僅 mode=off 可設) 時才會附上原文。
+
+        advisor=llm 且 allow_code_edit=True 時, LLM 可一併修改訓練程式 — 修改版由
+        code_workspace 放在 <run_dir>/src/ 之下執行, 原始程式不會被修改。
+        回 None = 無從修起, 放棄該分支。"""
         lp = node.trial.log_path if node.trial else None
-        if lp and os.path.isfile(lp):
+        mode = self.cfg.privacy.log_feedback
+        if mode == "none":
+            facts = ErrorFacts()
+        else:
+            facts = error_extract.extract(
+                lp, epoch_curve=(node.trial.epoch_curve if node.trial else None))
+        kwargs = {"workspace_dir": os.path.join(self.run_dir, "src")}
+        if mode == "raw" and lp and os.path.isfile(lp):
             try:
                 with open(lp, errors="ignore") as f:
-                    tail = "".join(f.readlines()[-120:])
+                    kwargs["log_tail"] = "".join(f.readlines()[-120:])
             except OSError:
                 pass
-        return self.advisor.propose_debug(
-            profile, encoder, node.trial, tail,
-            workspace_dir=os.path.join(self.run_dir, "src"))
+        try:
+            return self.advisor.propose_debug(
+                profile, encoder, node.trial, facts, **kwargs)
+        except TypeError:
+            # 舊介面 (不吃 log_tail) 的 Advisor
+            kwargs.pop("log_tail", None)
+            return self.advisor.propose_debug(
+                profile, encoder, node.trial, facts, **kwargs)
 
     def _maybe_resume(self, node: Node, force: bool = False) -> Optional[Recipe]:
         """繼續訓練策略: 節點訓練完但 curve 未收斂 → 從其 checkpoint 續訓
@@ -526,7 +698,9 @@ class LoopController:
         preloaded = bool(history)
         journal = self.journal = journal if journal is not None else Journal()
         history = history if history is not None else []
-        ds_name = os.path.basename(os.path.normpath(self.cfg.data_path))
+        # trial_id 用資料集**假名** — 這些 id 會出現在送往 LLM 的歷史與解答樹中,
+        # 用真實目錄名等於每一輪都把資料集名稱送出去 (docs/data_firewall_design.md §4.3)
+        ds_name = self._ds_tag
         stale = 0
         max_rounds = self.cfg.loop.max_trials
         max_attempts = max_rounds * 3  # 護欄: 選點連續失敗時不空轉
@@ -635,6 +809,8 @@ class LoopController:
                     workspace_dir=os.path.join(self.run_dir, "src"))
                 if action.narrative:
                     self._say("llm", action.narrative, kind="review", round=k)
+                # 決策層順帶要求的資訊 (分析器 / 問使用者) — 下一輪就會看到結果
+                self._handle_info(getattr(action, "info", None), k)
                 if action.stop or action.next_recipe is None:
                     self._say("llm", f"決定停止：{action.reason or '已收斂'}",
                               kind="decision", round=k)
@@ -748,6 +924,8 @@ class LoopController:
         if profile is None:
             profile = dataset_analyzer.analyze(
                 self.cfg.data_path, task_type=self.cfg.task.get("type", "classification"))
+        # 資料圍欄: 決策層從這裡才拿得到資料集描述, 而且只拿得到 DatasetFacts
+        self._setup_privacy(profile)
         self.ledger.write_profile(profile.model_dump_json(indent=2))
         self.cfg.dump_yaml(os.path.join(self.run_dir, "config.yaml"))
 
@@ -780,6 +958,19 @@ class LoopController:
                       f"或按「中斷實驗」停止。", kind="status")
             self._say("system", f"{self.cfg.advisor.type} 正在依資料挑選 encoder（請稍候…）",
                       kind="status")
+
+        # 資訊蒐集 (管道 A/B): 決策層看過 DatasetFacts 後, 可以點名要跑哪些分析器、
+        # 或提出只有使用者知道的問題。這是它取得資料特性的唯一途徑。
+        if not self.cfg.dry_run and hasattr(self.advisor, "plan_information"):
+            try:
+                info = self.advisor.plan_information(profile)
+                if info and (info.analyses or info.questions):
+                    self._say("llm", f"開始前我想先補一些資料特性："
+                              f"{info.reason or '見下方'}", kind="decision")
+                    self._handle_info(info)
+            except Exception as e:                   # noqa: BLE001
+                self._say("system", f"資訊蒐集階段失敗（{e}），直接以現有事實決策。",
+                          kind="status")
 
         if not choices:   # 全新 run, 或 resume 時連一個 draft 都還沒跑
             choices = self.advisor.select_encoders(profile)
@@ -851,8 +1042,10 @@ class LoopController:
                 continue
             if self._budget_exhausted():
                 break
+            # trial_id 用假名 (會進 LLM 的歷史); report.md 仍記真實 fold 名 (本機閱讀)
             fname = os.path.basename(fold)
-            task_id = f"{self.best.recipe.encoder.model_key}_{fname}_bestfold"
+            task_id = (f"{self.best.recipe.encoder.model_key}_"
+                       f"{self._fold_tag(fold)}_bestfold")
             # 用最佳 recipe 在此 fold 重跑; 若最佳來自 resume 節點, 其他 fold 要從頭訓練
             # (不能沿用原 fold 的 checkpoint), epochs 已含續訓延長量
             fold_recipe = self.best.recipe.model_copy(deep=True)

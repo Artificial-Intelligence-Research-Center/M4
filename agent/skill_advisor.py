@@ -26,9 +26,13 @@ import time
 from typing import Optional
 
 from .advisor import HeuristicAdvisor
+from .privacy import egress as egress_mod
+from .privacy import redact
+from .privacy.context import PrivacyContext
+from .privacy.facts import ErrorFacts
 from .schemas import (
-    DatasetProfile, EncoderChoice, NextAction, Recipe, SearchOverride,
-    TrialResult,
+    DatasetProfile, EncoderChoice, InfoRequest, NextAction, Recipe,
+    SearchOverride, TrialResult,
 )
 
 _DEFAULT_HANDOFF = os.path.join(
@@ -38,20 +42,49 @@ _DEFAULT_HANDOFF = os.path.join(
 
 class SkillAdvisor:
     def __init__(self, handoff_dir: str = _DEFAULT_HANDOFF,
-                 fallback: Optional[object] = None, wait_seconds: float = 0.0):
+                 fallback: Optional[object] = None, wait_seconds: float = 0.0,
+                 privacy: Optional[PrivacyContext] = None):
         self.handoff_dir = handoff_dir
         self.fallback = fallback or HeuristicAdvisor()
         self.wait_seconds = wait_seconds
         os.makedirs(self.handoff_dir, exist_ok=True)
         self._n = 0
+        # 資料圍欄: 交握檔是**同等級的出口** (要交給 Claude Code 讀), 一樣要消毒 + 掃描
+        self.privacy = privacy
+        self.analyses: list = []
+        self.analyzer_catalog: list[dict] = []
+
+    # ---- 資料圍欄 ------------------------------------------------------
+    def _ctx(self, profile: Optional[DatasetProfile] = None) -> PrivacyContext:
+        if self.privacy is None:
+            self.privacy = PrivacyContext.strict_for(profile)
+        return self.privacy
+
+    def _facts_payload(self, profile: Optional[DatasetProfile]) -> dict:
+        """交握 payload 的資料段 — 與 LLMAdvisor 共用同一組消毒函式。"""
+        ctx = self._ctx(profile)
+        out = {"dataset_facts": (ctx.facts(profile).model_dump()
+                                 if profile is not None else None),
+               "user_facts": ctx.refresh_user_facts().model_dump()}
+        if self.analyses:
+            out["analyses"] = [a.model_dump() for a in self.analyses]
+        return out
 
     # ---- 交握 ----------------------------------------------------------
-    def _write_request(self, method: str, payload: dict) -> str:
+    def _write_request(self, method: str, payload: dict,
+                       profile: Optional[DatasetProfile] = None,
+                       user_segments: tuple = ()) -> str:
+        """寫出決策請求。寫檔前先過出口掃描 — 命中即中止, 不留下含資料的檔案。"""
         self._n += 1
         req = {"method": method, "skill": "finetune-advisor", "payload": payload}
+        text = json.dumps(req, ensure_ascii=False, indent=2)
+        egress_mod.guard_payload(self._ctx(profile).egress,
+                                 f"skill:{method}", text,
+                                 user_segments=user_segments,
+                                 kind="skill_handoff")
         path = os.path.join(self.handoff_dir, f"req_{self._n:03d}_{method}.json")
         with open(path, "w", encoding="utf8") as f:
-            json.dump(req, f, ensure_ascii=False, indent=2)
+            f.write(text)
         return path
 
     def _resp_path(self, req_path: str) -> str:
@@ -81,12 +114,25 @@ class SkillAdvisor:
         from . import task_template
         return task_template.suggest(profile)
 
+    def plan_information(self, profile: DatasetProfile) -> InfoRequest:
+        req = self._write_request("plan_information", {
+            **self._facts_payload(profile),
+            "analyzer_catalog": self.analyzer_catalog,
+        }, profile)
+        resp = self._invoke_skill(req)
+        if resp and "info" in resp:
+            try:
+                return InfoRequest.model_validate(resp["info"])
+            except Exception:
+                pass
+        return InfoRequest()
+
     def select_encoders(self, profile: DatasetProfile) -> list[EncoderChoice]:
         from . import encoder_registry as reg
         req = self._write_request("select_encoders", {
-            "profile": profile.model_dump(),
+            **self._facts_payload(profile),
             "available_encoders": [c.model_dump() for c in reg.available_cards()],
-        })
+        }, profile)
         resp = self._invoke_skill(req)
         if resp and "encoders" in resp:
             try:
@@ -102,9 +148,9 @@ class SkillAdvisor:
     def compose_recipe(self, profile: DatasetProfile, encoder: EncoderChoice,
                        preset: str = "default") -> Recipe:
         req = self._write_request("compose_recipe", {
-            "profile": profile.model_dump(),
+            **self._facts_payload(profile),
             "encoder": encoder.model_dump(), "preset": preset,
-        })
+        }, profile)
         resp = self._invoke_skill(req)
         if resp and "recipe" in resp:
             try:
@@ -116,11 +162,12 @@ class SkillAdvisor:
     def propose_next(self, profile: DatasetProfile, encoder: EncoderChoice,
                      history: list[TrialResult],
                      base: Optional[TrialResult] = None) -> NextAction:
+        alias = self._ctx(profile).alias
         req = self._write_request("propose_next", {
-            "profile": profile.model_dump(), "encoder": encoder.model_dump(),
-            "history": [t.model_dump() for t in history],
-            "base": base.model_dump() if base else None,
-        })
+            **self._facts_payload(profile), "encoder": encoder.model_dump(),
+            "history": [redact.trial_facts(t, alias).model_dump() for t in history],
+            "base_trial_id": alias.substitute(base.trial_id) if base else None,
+        }, profile)
         resp = self._invoke_skill(req)
         if resp and "next_action" in resp:
             try:
@@ -130,13 +177,19 @@ class SkillAdvisor:
         return self.fallback.propose_next(profile, encoder, history, base=base)
 
     def propose_debug(self, profile: DatasetProfile, encoder: EncoderChoice,
-                      trial: TrialResult, log_tail: str,
-                      workspace_dir: Optional[str] = None) -> Optional[Recipe]:
-        req = self._write_request("propose_debug", {
-            "profile": profile.model_dump(), "encoder": encoder.model_dump(),
-            "trial": trial.model_dump(), "log_tail": log_tail,
+                      trial: TrialResult, error_facts: ErrorFacts,
+                      workspace_dir: Optional[str] = None,
+                      log_tail: Optional[str] = None) -> Optional[Recipe]:
+        alias = self._ctx(profile).alias
+        payload = {
+            **self._facts_payload(profile), "encoder": encoder.model_dump(),
+            "trial": redact.trial_facts(trial, alias).model_dump(),
+            "error_facts": (error_facts or ErrorFacts()).model_dump(),
             "workspace_dir": workspace_dir,
-        })
+        }
+        if log_tail:      # 只有 privacy.log_feedback="raw" (mode=off) 才會有
+            payload["log_tail"] = log_tail
+        req = self._write_request("propose_debug", payload, profile)
         resp = self._invoke_skill(req)
         if resp and "recipe" in resp:
             try:
@@ -145,20 +198,21 @@ class SkillAdvisor:
                 return Recipe.model_validate(resp["recipe"])
             except Exception:
                 pass
-        return self.fallback.propose_debug(profile, encoder, trial, log_tail,
-                                           workspace_dir)
+        return self.fallback.propose_debug(profile, encoder, trial, error_facts,
+                                           workspace_dir, log_tail)
 
     def review_and_decide(self, profile: DatasetProfile, encoder: EncoderChoice,
                           history: list[TrialResult], discussion: list[dict],
                           base: Optional[TrialResult] = None,
                           workspace_dir: Optional[str] = None) -> NextAction:
+        alias = self._ctx(profile).alias
         req = self._write_request("review_and_decide", {
-            "profile": profile.model_dump(), "encoder": encoder.model_dump(),
-            "history": [t.model_dump() for t in history],
-            "discussion": discussion,
-            "base": base.model_dump() if base else None,
+            **self._facts_payload(profile), "encoder": encoder.model_dump(),
+            "history": [redact.trial_facts(t, alias).model_dump() for t in history],
+            "discussion": redact.discussion_facts(discussion, alias),
+            "base_trial_id": alias.substitute(base.trial_id) if base else None,
             "workspace_dir": workspace_dir,
-        })
+        }, profile, tuple(redact.user_segments(discussion, alias)))
         resp = self._invoke_skill(req)
         if resp and "next_action" in resp:
             try:
@@ -172,10 +226,13 @@ class SkillAdvisor:
     def review_search_choice(self, profile: DatasetProfile, tree: list[dict],
                              proposal: dict,
                              discussion: list[dict]) -> SearchOverride:
+        alias = self._ctx(profile).alias
         req = self._write_request("review_search_choice", {
-            "profile": profile.model_dump(), "tree": tree,
-            "proposal": proposal, "discussion": discussion,
-        })
+            **self._facts_payload(profile),
+            "tree": redact.scrub(tree, alias),
+            "proposal": redact.scrub(proposal, alias),
+            "discussion": redact.discussion_facts(discussion, alias),
+        }, profile, tuple(redact.user_segments(discussion, alias)))
         resp = self._invoke_skill(req)
         if resp and "search_override" in resp:
             try:

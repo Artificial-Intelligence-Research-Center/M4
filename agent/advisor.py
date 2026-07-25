@@ -5,14 +5,14 @@
 """
 from __future__ import annotations
 
-import re
 from typing import Optional, Protocol
 
 from . import encoder_registry as reg
 from . import presets
+from .privacy.facts import ErrorFacts
 from .schemas import (
-    DatasetProfile, EncoderChoice, HeadSpec, HyperParams, Recipe, TrialResult,
-    NextAction, ComponentRef, SearchOverride,
+    DatasetProfile, EncoderChoice, HeadSpec, HyperParams, InfoRequest, Recipe,
+    TrialResult, NextAction, ComponentRef, SearchOverride,
 )
 
 # 超參起點 (default / paper / mae + 使用者自訂) 現由 presets 模組管理, 可於 web 編輯。
@@ -34,11 +34,18 @@ class Advisor(Protocol):
                           history: list[TrialResult], discussion: list[dict],
                           base: Optional[TrialResult] = None,
                           workspace_dir: Optional[str] = None) -> NextAction: ...
-    # 樹搜尋 debug 階段 (aideml): 依失敗 trial 的 log 修正 Recipe (允許時可含程式
-    # 修改, 副本放 workspace_dir, 原始程式不動); None = 放棄該分支
+    # 樹搜尋 debug 階段 (aideml): 依失敗 trial 的 **ErrorFacts** 修正 Recipe
+    # (允許時可含程式修改, 副本放 workspace_dir, 原始程式不動); None = 放棄該分支。
+    # ⚠ 資料圍欄: 這裡刻意不是原始 log — 原始 log 含 data_path 與影像路徑
+    #   (docs/data_firewall_design.md §8.1)。log_tail 只在 privacy.log_feedback="raw"
+    #   (僅 mode=off 可設) 時才會被填。
     def propose_debug(self, profile: DatasetProfile, encoder: EncoderChoice,
-                      trial: TrialResult, log_tail: str,
-                      workspace_dir: Optional[str] = None) -> Optional[Recipe]: ...
+                      trial: TrialResult, error_facts: ErrorFacts,
+                      workspace_dir: Optional[str] = None,
+                      log_tail: Optional[str] = None) -> Optional[Recipe]: ...
+    # 實驗開跑前的資訊蒐集: 決策層可點名執行已註冊的分析器, 或提出問題請使用者回答。
+    # 這是決策層取得「資料特性」的唯一途徑 (它看不到原始資料)。
+    def plan_information(self, profile: DatasetProfile) -> InfoRequest: ...
     # 樹搜尋節點選擇的覆寫機會: policy 選完後把「整棵樹 + 這次的選擇」交給決策層過目,
     # 讓討論/QA 結論能真的改變選到哪個節點 (預設維持 policy 的選擇)
     def review_search_choice(self, profile: DatasetProfile, tree: list[dict],
@@ -176,22 +183,27 @@ class HeuristicAdvisor:
 
         return NextAction(stop=True, reason="變異階梯已用盡, 停止此 encoder。")
 
+    def plan_information(self, profile: DatasetProfile) -> InfoRequest:
+        """規則式決策不需要額外資訊 — 它用的欄位 DatasetProfile 都有。"""
+        return InfoRequest()
+
     def propose_debug(self, profile: DatasetProfile, encoder: EncoderChoice,
-                      trial: TrialResult, log_tail: str,
-                      workspace_dir: Optional[str] = None) -> Optional[Recipe]:
-        """規則式除錯 (aideml debug 階段的離線退路): 由 log 尾端猜失敗原因,
+                      trial: TrialResult, error_facts: ErrorFacts,
+                      workspace_dir: Optional[str] = None,
+                      log_tail: Optional[str] = None) -> Optional[Recipe]:
+        """規則式除錯 (aideml debug 階段的離線退路): 依 ErrorFacts 的 error_class
         產生修正後 Recipe; 無從修起則回 None (放棄該分支)。
         規則式不修改程式, workspace_dir 僅為介面一致而保留。"""
-        tail = (log_tail or "").lower()
+        ef = error_facts or ErrorFacts()
         r = trial.recipe.model_copy(deep=True)
         hp = r.hparams
-        if "out of memory" in tail or "cuda error" in tail:
+        if ef.error_class in ("oom", "cuda"):
             if hp.batch_size <= 1:
                 return None
             fix = f"batch_size {hp.batch_size}->{hp.batch_size // 2} (OOM, accum_iter 補償)"
             hp.accum_iter *= 2
             hp.batch_size //= 2
-        elif re.search(r"\bnan\b|\binf\b", tail):
+        elif ef.error_class == "nan_loss":
             if hp.blr <= 1e-6:
                 return None
             fix = f"blr {hp.blr}->{hp.blr / 5:g} (loss 出現 NaN/Inf, 疑似 lr 過大)"
