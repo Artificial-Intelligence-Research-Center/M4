@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 import random
 import statistics
-from typing import Optional
 
 from PIL import Image
 
@@ -48,15 +47,6 @@ def _sample_image_paths(root: str, k: int = 40) -> list[str]:
                     paths.append(os.path.join(cdir, f))
     random.Random(0).shuffle(paths)
     return paths[:k]
-
-
-def _modality_hint(root: str) -> Optional[str]:
-    low = root.lower()
-    for key in ("fundus", "aptos", "messidor", "idrid", "papila",
-                "glaucoma", "retina", "gastro", "endoscop"):
-        if key in low:
-            return key
-    return None
 
 
 def analyze(root: str, task_type: str = "classification") -> DatasetProfile:
@@ -117,5 +107,4 @@ def analyze(root: str, task_type: str = "classification") -> DatasetProfile:
         image_size_stats=size_stats,
         is_grayscale=is_gray,
         imbalance_ratio=round(imbalance, 3),
-        modality_hint=_modality_hint(root),
     )

@@ -41,8 +41,11 @@ def write_report(run_dir: str, profile: DatasetProfile, cfg: AgentConfig,
                  f"{profile.class_names}")
     lines.append(f"- 樣本數: train={profile.n_train} / val={profile.n_val} "
                  f"/ test={profile.n_test}")
-    lines.append(f"- 不平衡比: {profile.imbalance_ratio}，"
-                 f"modality: {profile.modality_hint}\n")
+    # 影像模態由使用者提供 (不從路徑猜); 沒填就不顯示
+    from .privacy import load_user_facts
+    uf = load_user_facts(run_dir)
+    modality = "、".join(x for x in (uf.modality, uf.anatomy) if x) or "未指定"
+    lines.append(f"- 不平衡比: {profile.imbalance_ratio}，modality: {modality}\n")
 
     lines.append("## 各 encoder 最佳 Recipe 比較\n")
     lines.append(f"| encoder | adaptation | trials | primary({cfg.eval.primary_metric}) "

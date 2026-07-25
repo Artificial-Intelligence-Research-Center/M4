@@ -81,7 +81,7 @@ async function analyze() {
   html += `<tr><td>類別數</td><td>${p.num_classes} — ${p.class_names.join(', ')}</td></tr>`;
   html += `<tr><td>樣本 (train/val/test)</td><td>${p.n_train} / ${p.n_val} / ${p.n_test}</td></tr>`;
   html += `<tr><td>不平衡比</td><td>${p.imbalance_ratio}</td></tr>`;
-  html += `<tr><td>領域線索</td><td>${p.modality_hint || '—'}</td></tr></table>`;
+  html += `<tr><td>影像尺寸 (中位)</td><td>${(p.image_size_stats&&p.image_size_stats.width)?`${p.image_size_stats.width.median} × ${p.image_size_stats.height.median}`:'—'}</td></tr></table>`;
   html += `<label>組出的 Recipe (encoder: <b>${j.recipe.encoder.model_key}</b>, ${j.recipe.encoder.adaptation})</label>`;
   html += '<pre>' + JSON.stringify(j.recipe, null, 2) + '</pre>';
   html += '<label>訓練指令</label><pre>' + j.command + '</pre>';

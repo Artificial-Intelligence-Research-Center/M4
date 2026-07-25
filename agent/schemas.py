@@ -32,7 +32,8 @@ class DatasetProfile(BaseModel):
     image_size_stats: dict = Field(default_factory=dict)  # min/max/median H,W
     is_grayscale: bool = False
     imbalance_ratio: float = 1.0  # 最多類 / 最少類
-    modality_hint: Optional[str] = None
+    # (已移除 modality_hint — 舊版由路徑關鍵字猜測, 既不準又等於把路徑內容送進決策。
+    #  影像模態改由使用者在 UI 指定, 存於 runs/<run>/user_facts.json)
 
 
 # ---------------------------------------------------------------------------
