@@ -470,6 +470,7 @@ function trialCard(t, cmap){
     +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Loss（train / val · 逐 epoch）</div>'
       +svgLine([{name:'train_loss', color:'#c0392b', data:cv.train_loss},
                 {name:'val_loss',   color:'#e8710a', data:cv.val_loss, best:'min'}])
+      +'<div class="muted" style="font-size:11px;margin-top:2px">train 是<b>訓練 criterion</b>（可能含 weighted_ce／label smoothing／mixup，且套用 augmentation·dropout·drop_path）的<b>整個 epoch 平均</b>；val 是 <b>plain CrossEntropy</b>、無擴增、epoch 結束時的快照。兩者<b>算法不同、不可直接比大小</b>——train 高於 val 是正常的，請看各自<b>下降趨勢</b>而非兩者差距。</div>'
       +(ft&&ft.loss!=null?`<div class="muted" style="margin-top:2px">最終 test loss ${fmt(ft.loss)}（未畫入曲線）</div>`:'')
       +'</div>'
     +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Score / 指標（<b>val</b> · 逐 epoch · 0–1）</div>'
