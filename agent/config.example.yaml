@@ -9,7 +9,7 @@ experiment_name: null                     # null -> run_YYYYmmdd_HHMMSS
 eval:
   primary_metric: score                   # 迴圈最佳化目標 (score = (f1+roc_auc+kappa)/3)
   report_metrics: [accuracy, f1, roc_auc, kappa]
-  aggregation: single                     # single | mean_std (多 fold, P5)
+  aggregation: single                     # single | mean_std（單一最佳 recipe 套各 fold 重跑）| per_fold（每個 fold 各自獨立搜尋最佳 recipe）
 
 loop:
   max_trials: 12                           # 全域 trial 總數上限 (= 樹搜尋總輪數)

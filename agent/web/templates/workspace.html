@@ -173,6 +173,7 @@
                 <table class="opt-tbl"><tbody>
                 {{ orow('aggregation','single','single',True,'aggregation.single') }}
                 {{ orow('aggregation','mean_std','mean_std',False,'aggregation.mean_std') }}
+                {{ orow('aggregation','per_fold','per_fold',False,'aggregation.per_fold') }}
                 </tbody></table>
               </fieldset>
             </section>
@@ -478,6 +479,9 @@ function trialCard(t, cmap){
 }
 // ---- 解答樹節點 → 跳出式結果對話框 --------------------------------------
 let _lastRun=null;
+// per_fold: 目前選擇顯示哪個 fold ('all' = 全部疊著顯示; 否則為 fold index 字串)
+let _foldFilter='all';
+function setFold(v){ _foldFilter=String(v); pollRunStatus(); }
 function openTrialModal(tid){
   const m=document.getElementById('trial-modal');
   const title=document.getElementById('trial-modal-title');
@@ -564,17 +568,51 @@ async function pollRunStatus(){
   renderChatProgress(j, cur);
   // 設定 cell
   if(j.config) html+=cell('本次 run 設定 (config.yaml)','', '<pre style="max-height:240px">'+esc(j.config)+'</pre>', 'config');
-  // 進行中 trial cell
-  if(rt && rt.recipe && rt.recipe.encoder) html+=cell('⏳ 進行中 trial（即時參數 + 曲線）', esc(rt.trial_id), trialCard(rt, cmap), 'running');
-  // histogram cell
-  const bars=done.filter(t=>t.status==='done').map(t=>({label:t.trial_id.length>34?'…'+t.trial_id.slice(-32):t.trial_id,
+  // per_fold: fold 選擇器 (指定只看某個 fold; 「全部」= 疊著顯示)
+  const foldOf=t=>{ const p=(t.recipe&&t.recipe.provenance)||{}; return p.fold; };
+  if(j.folds && j.folds.length){
+    const fbtn=(v,label,active)=>`<button type="button" onclick="setFold('${v}')" `
+      +`style="width:auto;margin:0 6px 0 0;padding:3px 11px;border-radius:999px;font-size:12px;cursor:pointer;`
+      +`border:1px solid ${active?'#9dbcf5':'#e3e6ea'};background:${active?'#eaf1fd':'#fff'};`
+      +`color:${active?'#1a4fa0':'#374151'};font-weight:${active?600:400}">${esc(label)}</button>`;
+    let sel=fbtn('all','全部', _foldFilter==='all');
+    j.folds.forEach(f=>{ sel+=fbtn(f.index, 'Fold '+(f.index+1)
+      +(f.primary!=null?(' · '+fmt(f.primary)):''), String(f.index)===_foldFilter); });
+    html+=cell('🗂 選擇 fold 顯示','', '<div style="display:flex;flex-wrap:wrap;align-items:center">'+sel+'</div>', 'foldsel');
+  }
+  // 進行中 trial cell (per_fold 且指定單一 fold 時, 只在該 fold 進行中才顯示)
+  const runFold = rt && rt.recipe ? (rt.recipe.provenance||{}).fold : undefined;
+  const showRun = rt && rt.recipe && rt.recipe.encoder
+    && (!j.folds || _foldFilter==='all' || String(runFold)===_foldFilter);
+  if(showRun) html+=cell('⏳ 進行中 trial（即時參數 + 曲線）', esc(rt.trial_id), trialCard(rt, cmap), 'running');
+  // histogram / 解答樹 / trial cells —— per_fold 模式分 fold 顯示
+  const histBars=ts=>ts.filter(t=>t.status==='done').map(t=>({
+    label:t.trial_id.length>34?'…'+t.trial_id.slice(-32):t.trial_id,
     value:t.primary_score||0, color:encColor(cmap, t.recipe.encoder.model_key)}));
-  html+=cell('結果 histogram（各 trial primary＝test 成績 · 顏色=encoder）','', svgBars(bars), 'histogram');
-  // 解答樹 cell (AIDE 式搜尋)
-  if(j.search_tree && Object.keys(j.search_tree).length)
-    html+=cell('🌳 解答樹（AIDE 式搜尋：先開滿 draft → 每輪依指標機率選節點 improve/debug/resume）','', svgTreeAll(j.search_tree, cmap), 'tree');
-  // 各完成 trial cells
-  done.slice().reverse().forEach(t=>{ html+=cell('trial：'+t.trial_id, `<span class="pill ${t.status}">${t.status}</span>`, trialCard(t, cmap), 'trial:'+t.trial_id); });
+  const trialCells=ts=>ts.slice().reverse().forEach(t=>{
+    html+=cell('　trial：'+t.trial_id, `<span class="pill ${t.status}">${t.status}</span>`,
+      trialCard(t, cmap), 'trial:'+t.trial_id); });
+  if(j.folds && j.folds.length){
+    j.folds.forEach(f=>{
+      if(_foldFilter!=='all' && String(f.index)!==_foldFilter) return;   // 只顯示選定 fold
+      const ft=done.filter(t=>foldOf(t)===f.index);
+      const nd=ft.filter(t=>t.status==='done').length;
+      const meta=(f.primary!=null?('最佳 primary '+fmt(f.primary)+' · '):'')+nd+' 完成';
+      html+=cell('🗂 Fold '+(f.index+1)+'：'+esc(f.name), meta, '', 'foldhdr:'+f.index);
+      const tr=f.tree;
+      if(tr && ((tr.nodes&&tr.nodes.length)||(!tr.nodes&&Object.keys(tr).length)))
+        html+=cell('　🌳 解答樹（fold '+(f.index+1)+'）','', svgTreeAll(tr, cmap), 'tree:fold'+f.index);
+      html+=cell('　📊 histogram（fold '+(f.index+1)+'）','', svgBars(histBars(ft)), 'hist:fold'+f.index);
+      trialCells(ft);
+    });
+    if(_foldFilter==='all')
+      trialCells(done.filter(t=>foldOf(t)===undefined));   // 未標記 fold 的 trial (理論上無)
+  } else {
+    html+=cell('結果 histogram（各 trial primary＝test 成績 · 顏色=encoder）','', svgBars(histBars(done)), 'histogram');
+    if(j.search_tree && Object.keys(j.search_tree).length)
+      html+=cell('🌳 解答樹（AIDE 式搜尋：先開滿 draft → 每輪依指標機率選節點 improve/debug/resume）','', svgTreeAll(j.search_tree, cmap), 'tree');
+    done.slice().reverse().forEach(t=>{ html+=cell('trial：'+t.trial_id, `<span class="pill ${t.status}">${t.status}</span>`, trialCard(t, cmap), 'trial:'+t.trial_id); });
+  }
   // report cell
   if(j.report) html+=cell('report.md','', '<pre style="max-height:300px">'+esc(j.report)+'</pre>', 'report');
   // LLM 完整提示詞與回應: 每次呼叫獨立成格 (key=ts) → 已展開的呼叫不會因輪詢/新呼叫而重載

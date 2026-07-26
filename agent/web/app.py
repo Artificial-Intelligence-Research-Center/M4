@@ -727,6 +727,30 @@ def run_status():
         except Exception:
             pass
 
+    # per_fold 模式: 分 fold 索引 (folds.json) + 各 fold 的解答樹
+    folds = None
+    fjp = os.path.join(run_dir, "folds.json")
+    if os.path.isfile(fjp):
+        try:
+            with open(fjp, encoding="utf8") as fh:
+                fj = json.load(fh)
+            folds = fj.get("folds") or []
+            cur = fj.get("current", -1)
+            for ent in folds:
+                # 進行中的 fold 用即時 search_tree.json; 已完成的用各自的快照檔
+                tfile = ("search_tree.json" if ent.get("index") == cur
+                         else ent.get("tree"))
+                ent["tree"] = None
+                tp = os.path.join(run_dir, tfile) if tfile else None
+                if tp and os.path.isfile(tp):
+                    try:
+                        with open(tp, encoding="utf8") as th:
+                            ent["tree"] = json.load(th)
+                    except Exception:
+                        ent["tree"] = None
+        except Exception:
+            folds = None
+
     # LLM 完整 prompt/回應記錄 (llm_calls.jsonl); 只回最近 30 筆以控大小
     llm_calls = []
     lcp = os.path.join(run_dir, "llm_calls.jsonl")
@@ -771,7 +795,7 @@ def run_status():
                     "conversation": convo.read(run_dir),
                     "stopped": convo.stop_requested(run_dir)[0],
                     "qa_stream": qa_stream, "user_facts": user_facts,
-                    "privacy": privacy,
+                    "privacy": privacy, "folds": folds,
                     "llm_calls": llm_calls, "search_tree": search_tree})
 
 

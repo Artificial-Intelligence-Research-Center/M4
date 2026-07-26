@@ -249,3 +249,14 @@ X 光平片（如胸腔 X 光）。
 
 <!-- key: anatomy.other -->
 其他部位。
+
+<!-- key: aggregation.per_fold -->
+## 多 fold 彙整：per_fold（每個 fold 各自搜尋）
+
+對每個 sibling fold（`..._fold0/1/…`）**從頭獨立跑一次完整搜尋**，各自找出該 fold 的最佳 encoder／超參——不同 fold 可能得到不同的最佳配方。
+
+- 與 `mean_std` 不同：`mean_std` 只把**單一**最佳 recipe 套到各 fold 重跑；`per_fold` 是**各 fold 獨立選模型**。
+- **迴圈預算每個 fold 各自獨立**：`max_trials` 與時間預算對每個 fold 分別重新起算（fold 0 用完不會排擠後面的 fold）。只有「中斷實驗」會結束整個逐 fold 流程。
+- **成本最高**：≈ N 倍的完整搜尋（5-fold＝5 次）。
+- 報告列出每個 fold 的最佳 recipe／關鍵超參／分數，並給各 fold 最佳分數的 **mean ± std**；每個 fold 的解答樹另存 `search_tree_foldN.json`。
+- 需要路徑以 `_fold0/1/…` 命名且同層有其他 fold。

@@ -115,7 +115,9 @@ class EvalConfig(BaseModel):
     report_metrics: list[str] = Field(
         default_factory=lambda: ["accuracy", "f1", "roc_auc", "kappa"]
     )
-    aggregation: Literal["single", "mean_std"] = "single"
+    # single: 只在單一 fold 搜尋; mean_std: 單一最佳 recipe 套到各 fold 重跑彙整;
+    # per_fold: 每個 fold 各自跑一次完整搜尋, 獨立找出該 fold 的最佳 recipe。
+    aggregation: Literal["single", "mean_std", "per_fold"] = "single"
 
 
 class TrialResult(BaseModel):

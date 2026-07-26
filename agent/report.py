@@ -29,7 +29,7 @@ def _fmt_metrics(m: dict, keys: list[str]) -> str:
 def write_report(run_dir: str, profile: DatasetProfile, cfg: AgentConfig,
                  choices, per_encoder: dict, best: Optional[TrialResult],
                  dry_run: bool = False, fold_summary: Optional[dict] = None,
-                 ensemble=None) -> str:
+                 ensemble=None, per_fold_summary: Optional[dict] = None) -> str:
     keys = cfg.eval.report_metrics
     lines: list[str] = []
     lines.append(f"# 自動微調報告 — {os.path.basename(run_dir)}\n")
@@ -83,6 +83,31 @@ def write_report(run_dir: str, profile: DatasetProfile, cfg: AgentConfig,
                      f"{p['mean']:.4f} ± {p['std']:.4f} (n={p['n']})")
         for k, mv in sorted(fold_summary["metrics"].items()):
             lines.append(f"  - {k}: {mv['mean']:.4f} ± {mv['std']:.4f}")
+
+    if per_fold_summary is not None:
+        p = per_fold_summary["primary"]
+        pm = cfg.eval.primary_metric
+        lines.append("\n## 逐 fold 獨立搜尋（每個 fold 各自找最佳 recipe）\n")
+        lines.append(f"- **各 fold 最佳 primary {pm}**: "
+                     f"{p['mean']:.4f} ± {p['std']:.4f}（n={p['n']}）")
+        lines.append(f"\n| fold | encoder | adaptation | trials | primary({pm}) "
+                     f"| {' | '.join(keys)} | 關鍵超參 |")
+        lines.append("| --- | --- | --- | --- | --- | "
+                     + " | ".join("---" for _ in keys) + " | --- |")
+        for r in per_fold_summary["per_fold"]:
+            if "encoder" not in r:
+                lines.append(f"| {r['fold']} | — | — | {r.get('n_trials', 0)} | "
+                             "— | " + " | ".join("—" for _ in keys) + " | — |")
+                continue
+            hp = r.get("hparams", {})
+            hp_s = (f"blr={hp.get('blr')} · epochs={hp.get('epochs')} · "
+                    f"layer_decay={hp.get('layer_decay')} · drop_path={hp.get('drop_path')}")
+            lines.append(
+                f"| {r['fold']} | {r['encoder']} | {r.get('adaptation', '-')} | "
+                f"{r.get('n_trials', 0)} | {r['primary_score']:.4f} | "
+                f"{_fmt_metrics(r.get('metrics', {}), keys)} | {hp_s} |")
+        lines.append("\n> 各 fold 從頭獨立搜尋，最佳 encoder／超參可能不同；"
+                     "解答樹分別存於 `search_tree_fold0.json …`。\n")
 
     if ensemble is not None and ensemble.status == "done":
         best_s = best.primary_score if best is not None else None

@@ -86,6 +86,7 @@ class LoopController:
         self._n_search_ens = 0             # 已執行的搜尋中集成次數 (方案B 上限用)
         self._last_ens_pool = 0            # 上次搜尋中集成時的模型池大小 (避免每輪重跑)
         self._ens_llm = None               # 專用 LLM 成員選擇器 (llm_select 且主 advisor 非 LLM 時)
+        self._cur_fold = None              # per_fold 模式: 目前搜尋中的 fold {index,name}
         self._stopped = False   # 使用者/LLM 中斷
         self.journal: Optional[Journal] = None  # 全域解答樹 (落地 search_tree.json)
         self._last_gpu_stats: dict = {}  # 最近一個 trial 的 GPU 取樣 (draft 的 boost 依據)
@@ -262,6 +263,9 @@ class LoopController:
                  task_id: str) -> TrialResult:
         """組指令 -> 訓練 -> 評估 -> 落地 ledger, 回傳 TrialResult。"""
         log_path = os.path.join(self.logs_dir, f"log_{task_id}.txt")
+        # per_fold 模式: 蓋上 fold index (供 UI 分 fold 顯示; 非白名單欄位, 不進 LLM facts)
+        if self._cur_fold is not None:
+            recipe.provenance["fold"] = self._cur_fold["index"]
         trial = TrialResult(trial_id=task_id, recipe=recipe, status="running")
 
         head = recipe.heads[0].type if recipe.heads else "-"
@@ -693,6 +697,26 @@ class LoopController:
         except Exception:
             pass
 
+    def _snapshot_tree(self, name: str) -> None:
+        """把目前 journal 另存一份 (per_fold 模式: 每個 fold 的解答樹存成一檔)。"""
+        if self.journal is None:
+            return
+        try:
+            with open(os.path.join(self.run_dir, name), "w", encoding="utf8") as f:
+                json.dump(self.journal.to_dict(), f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _write_folds_json(self, current: int, entries: list) -> None:
+        """per_fold 索引 (供 UI 分 fold 顯示): 目前 fold + 各 fold 的名稱/解答樹檔/最佳。"""
+        try:
+            with open(os.path.join(self.run_dir, "folds.json"), "w",
+                      encoding="utf8") as f:
+                json.dump({"mode": "per_fold", "current": current,
+                           "folds": entries}, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     def _tree_search(self, profile: DatasetProfile, choices,
                      journal: Optional[Journal] = None,
                      history: Optional[list[TrialResult]] = None) -> list[TrialResult]:
@@ -1105,6 +1129,33 @@ class LoopController:
                           + "、".join(f"{c.model_key}({c.adaptation})" for c in choices),
                           kind="decision")
 
+        # 逐 fold 獨立搜尋 (aggregation=per_fold): 每個 fold 各自找最佳 recipe
+        if (self.cfg.eval.aggregation == "per_fold"
+                and len(discover_folds(self.cfg.data_path)) > 1):
+            pfs = self._per_fold_search(profile, choices)
+            per_encoder = {}
+            for t in pfs["best_trials"]:            # 各 fold 最佳依 encoder 分組供報告
+                per_encoder.setdefault(t.recipe.encoder.model_key, []).append(t)
+            self._clear_current()
+            if not self.cfg.dry_run:
+                p = pfs["primary"]
+                if self.best is not None:
+                    self._say("llm",
+                              f"逐 fold 搜尋完成（{p['n']} folds）。整體最佳 "
+                              f"{self.best.recipe.encoder.model_key} "
+                              f"primary={self.best.primary_score:.4f}；各 fold "
+                              f"mean±std = {p['mean']:.4f}±{p['std']:.4f}。", kind="final")
+                else:
+                    self._say("system", "逐 fold 搜尋結束，無成功 trial。", kind="final")
+            report_path = report_mod.write_report(
+                self.run_dir, profile, self.cfg, choices, per_encoder,
+                self.best, dry_run=self.cfg.dry_run, per_fold_summary=pfs)
+            return {"profile": profile, "choices": choices,
+                    "per_encoder": per_encoder, "best": self.best,
+                    "ensemble": None, "n_trials": self.n_trials,
+                    "fold_summary": None, "per_fold_summary": pfs,
+                    "report_path": report_path, "run_dir": self.run_dir}
+
         # 單一全域解答樹搜尋 (draft 跨 encoder; per_encoder 僅供 report 分組)
         history = self._tree_search(profile, choices,
                                     journal=journal, history=prior_history)
@@ -1202,6 +1253,106 @@ class LoopController:
         return {
             "encoder": self.best.recipe.encoder.model_key,
             "folds": done_folds,
+            "primary": agg,
+            "metrics": mreg.aggregate_metrics(metrics_list),
+        }
+
+    # ---- 逐 fold 獨立搜尋 (aggregation=per_fold) -----------------------
+    def _per_fold_search(self, profile: DatasetProfile, choices) -> dict:
+        """每個 sibling fold 各自跑一次完整樹搜尋, 獨立找出該 fold 的最佳 recipe。
+
+        與 mean_std 不同: mean_std 是「單一最佳 recipe 套到各 fold 重跑」; 這裡是
+        「每個 fold 從頭獨立搜尋」——各 fold 可能得到不同的最佳 encoder / 超參。
+        每個 fold 重建 privacy context (per-fold 假名 / 出口守衛), 解答樹存成獨立檔。
+        """
+        folds = discover_folds(self.cfg.data_path)
+        saved_dp = self.cfg.data_path
+        ttype = self.cfg.task.get("type", "classification")
+        pm = self.cfg.eval.primary_metric
+        per_fold: list[dict] = []
+        fold_entries: list[dict] = []        # 供 UI 分 fold 顯示 (folds.json)
+        best_trials: list[TrialResult] = []
+        scores, metrics_list = [], []
+        overall_best: Optional[TrialResult] = None
+        total_trials = 0
+        try:
+            for i, fold in enumerate(folds):
+                # 只有『使用者中斷』會結束整個逐 fold 流程; 預算 (max_trials/時間) 每個
+                # fold 各自獨立 (見下方重置), 不會因前一個 fold 用完而跳過後面的 fold。
+                if self._stopped:
+                    self._say("system", "已中斷，結束逐 fold 搜尋。", kind="status")
+                    break
+                fname = os.path.basename(os.path.normpath(fold))
+                self._say("system",
+                          f"━━━ Fold {i + 1}/{len(folds)}（{fname}）獨立搜尋開始 ━━━",
+                          kind="status")
+                # 切到此 fold + 重建 privacy(per-fold 假名/守衛) + 重置搜尋狀態
+                self.cfg.data_path = fold
+                self._cur_fold = {"index": i, "name": fname}
+                fold_entries.append({"index": i, "name": fname,
+                                     "tree": f"search_tree_fold{i}.json",
+                                     "n_done": 0, "primary": None, "best": None})
+                self._write_folds_json(i, fold_entries)   # 標記目前 fold (UI 即時分頁)
+                fold_profile = (profile
+                                if os.path.abspath(fold) == os.path.abspath(saved_dp)
+                                else dataset_analyzer.analyze(fold, task_type=ttype))
+                self._setup_privacy(fold_profile)
+                if hasattr(self.advisor, "analyses"):
+                    self.advisor.analyses = []       # 各 fold 分析結果不互相沿用
+                self.journal = None
+                self.best = None
+                # 每個 fold 的迴圈預算各自獨立: 重置 trial 計數與計時起點 (max_trials /
+                # max_wall_clock_min 對每個 fold 分別重新起算), 以及 resume 自適應旗標。
+                self.n_trials = 0
+                self._t0 = time.time()
+                self._resume_fails = 0
+                self._resume_disabled = False
+                history = self._tree_search(fold_profile, choices)
+                total_trials += self.n_trials
+                self._snapshot_tree(f"search_tree_fold{i}.json")
+
+                fb = self.best
+                n_done = len([t for t in history if t.status == "done"])
+                fold_entries[-1]["n_done"] = n_done
+                if fb is not None:
+                    fold_entries[-1]["primary"] = fb.primary_score
+                    fold_entries[-1]["best"] = fb.trial_id
+                self._write_folds_json(i, fold_entries)
+                row = {"fold": fname, "n_trials": n_done}
+                if fb is not None:
+                    row.update({
+                        "encoder": fb.recipe.encoder.model_key,
+                        "adaptation": fb.recipe.encoder.adaptation,
+                        "primary_score": fb.primary_score,
+                        "metrics": fb.metrics,
+                        "hparams": fb.recipe.hparams.model_dump(),
+                        "trial_id": fb.trial_id,
+                        "mutation": fb.recipe.provenance.get("mutation"),
+                    })
+                    scores.append(fb.primary_score)
+                    metrics_list.append(fb.metrics)
+                    best_trials.append(fb)
+                    if overall_best is None or fb.primary_score > overall_best.primary_score:
+                        overall_best = fb
+                    self._say("llm",
+                              f"Fold {i + 1}（{fname}）最佳：{fb.recipe.encoder.model_key} "
+                              f"primary({pm})={fb.primary_score:.4f}（trial={fb.trial_id}）。",
+                              kind="decision")
+                else:
+                    self._say("system", f"Fold {i + 1}（{fname}）無成功 trial。",
+                              kind="status")
+                per_fold.append(row)
+        finally:
+            self.cfg.data_path = saved_dp
+            self._cur_fold = None
+            self._write_folds_json(-1, fold_entries)   # current=-1: 全部完成
+        self.n_trials = total_trials          # 對外顯示全部 fold 的 trial 總數
+        self.best = overall_best
+        agg = mreg.aggregate(scores)
+        return {
+            "folds": [r["fold"] for r in per_fold],
+            "per_fold": per_fold,
+            "best_trials": best_trials,
             "primary": agg,
             "metrics": mreg.aggregate_metrics(metrics_list),
         }
