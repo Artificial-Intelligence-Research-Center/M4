@@ -63,25 +63,25 @@
         {{ dataset_picker(dataset_groups, default_data, 'dp-full') }}
         <div class="row">
           <div><label>決策層 (advisor)</label>
-            <select name="advisor">{% for a in advisors %}<option value="{{ a }}">{{ a }}</option>{% endfor %}</select></div>
+            <select name="advisor">{% for a in advisors %}<option value="{{ a }}" {{ 'selected' if a == settings.advisor_type }}>{{ a }}</option>{% endfor %}</select></div>
           <div><label>超參起點</label>
             <select name="preset">{% for p in presets %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select></div>
-          <div><label>主要指標</label><input type="text" name="primary_metric" value="score"></div>
+          <div><label>主要指標</label><input type="text" name="primary_metric" value="{{ settings.primary_metric }}"></div>
           <div><label>多 fold 彙整</label>
             <select name="aggregation"><option value="single">single</option><option value="mean_std">mean_std</option></select></div>
         </div>
         <div class="row">
-          <div><label>起手 drafts（跨 encoder）</label><input type="text" name="num_drafts" value="3"></div>
-          <div><label>max_trials（總輪數上限）</label><input type="text" name="max_trials" value="12"></div>
-          <div><label title="至少完成這麼多輪才允許 patience 提早停">min_trials（至少輪數）</label><input type="text" name="min_trials" value="6"></div>
-          <div><label title="連續這麼多輪 improve/resume 無提升才停；draft/debug 不計">patience（無提升容忍）</label><input type="text" name="patience" value="4"></div>
+          <div><label>起手 drafts（跨 encoder）</label><input type="text" name="num_drafts" value="{{ settings.num_drafts }}"></div>
+          <div><label>max_trials（總輪數上限）</label><input type="text" name="max_trials" value="{{ settings.max_trials }}"></div>
+          <div><label title="至少完成這麼多輪才允許 patience 提早停">min_trials（至少輪數）</label><input type="text" name="min_trials" value="{{ settings.min_trials }}"></div>
+          <div><label title="連續這麼多輪 improve/resume 無提升才停；draft/debug 不計">patience（無提升容忍）</label><input type="text" name="patience" value="{{ settings.patience }}"></div>
         </div>
         <div class="row">
           <div><label title="LLM 看不到任何原始資料；strict 另外禁止修改訓練程式，避免經由 log 回讀資料">資料圍欄</label>
             <select name="privacy_mode" id="privacy-mode" onchange="onPrivacyMode()">
-              <option value="strict">strict（預設：LLM 完全看不到資料，且不可改程式）</option>
-              <option value="standard">standard（可改程式；原始 log 仍不回饋給 LLM）</option>
-              <option value="off">off（關閉圍欄，不建議）</option>
+              <option value="strict" {{ 'selected' if settings.privacy_mode == 'strict' }}>strict（預設：LLM 完全看不到資料，且不可改程式）</option>
+              <option value="standard" {{ 'selected' if settings.privacy_mode == 'standard' }}>standard（可改程式；原始 log 仍不回饋給 LLM）</option>
+              <option value="off" {{ 'selected' if settings.privacy_mode == 'off' }}>off（關閉圍欄，不建議）</option>
             </select></div>
           <div><label title="LLM 不從資料夾名稱猜測，由你指定">影像模態</label>
             <select name="modality"><option value="">未指定</option>

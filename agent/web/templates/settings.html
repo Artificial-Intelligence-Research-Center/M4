@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}設定 — M4{% endblock %}
+{% block content %}
+  {% if request.args.get('saved') %}
+  <div class="banner ok">已儲存，對<strong>之後啟動的新實驗</strong>立即生效（正在跑的實驗不受影響）。</div>
+  {% endif %}
+
+  <div class="card">
+    <h2>整體設定 (Global Settings)</h2>
+    <div class="muted">這些是<strong>所有新實驗的預設值</strong>，存於 <code>~/.medclaw/settings.json</code>
+      （在 repo 之外，API key 不會進 git；檔案權限 <code>600</code>）。工作台「新完整流程」表單有填的欄位仍會覆寫這裡的值；
+      <code>model</code> 與 <code>improve_temperature</code> 沒有表單欄位，完全由這裡決定。
+      <strong>已在跑的實驗不受影響</strong>，需重新啟動才會套用。</div>
+
+    <form action="settings/save/" method="post">
+      {# API key 單獨一區 #}
+      {% for key, label, typ, default, choices in fields if typ == 'secret' %}
+      <label>{{ label }}</label>
+      <input type="password" name="{{ key }}" autocomplete="off"
+             placeholder="{{ '已設定（留空＝不變更）' if values[key] else '尚未設定，貼上 sk-ant-… ' }}">
+      <div class="muted">供 <code>advisor=llm/skill</code> 呼叫 Claude API 使用。留空代表沿用現有值；
+        {% if values[key] %}目前<span class="pill done">已設定</span>{% else %}目前<span class="pill failed">未設定</span>（也可改用環境變數 <code>ANTHROPIC_API_KEY</code> 或 <code>ant auth login</code>）{% endif %}。</div>
+      {% endfor %}
+
+      {# 其餘參數: 依型別自動渲染 #}
+      <div class="row" style="margin-top:14px">
+        {% for key, label, typ, default, choices in fields if typ != 'secret' %}
+        <div style="flex:1 1 210px">
+          <label>{{ label }}</label>
+          {% if typ == 'choice' %}
+          <select name="{{ key }}">
+            {% for c in choices %}<option value="{{ c }}" {{ 'selected' if values[key]|string == c }}>{{ c }}</option>{% endfor %}
+          </select>
+          {% else %}
+          <input type="text" name="{{ key }}" value="{{ values[key] }}"
+                 inputmode="{{ 'decimal' if typ=='float' else ('numeric' if typ=='int' else 'text') }}">
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+
+      <button type="submit" class="primary">儲存設定</button>
+    </form>
+  </div>
+{% endblock %}

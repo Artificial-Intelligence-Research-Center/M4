@@ -22,7 +22,7 @@ loop:
   num_drafts: 3                            # 起手 draft 數 (輪流各 encoder; 同 encoder 換 preset)
   debug_prob: 0.5                          # 每輪以此機率優先除錯失敗的 leaf
   max_debug_depth: 2                       # 連續除錯鏈上限 (超過就放棄該分支)
-  improve_temperature: 0.03                # 依指標抽樣選改善起點的 softmax 溫度; <=0 = greedy
+  improve_temperature: 0.2                 # 依指標抽樣選改善起點的 softmax 溫度; <=0 = greedy
   # policy 選完節點後, 讓決策層 (LLM) 有改選的機會 — 討論/【QA 結論】要求換 encoder、
   # 開新 draft、回頭改某個節點時, 這是唯一能落實的地方 (改良階段只能在已選定的節點上變異)。
   # 每輪多一次 LLM 呼叫; advisor=heuristic 一律沿用 policy。改選會驗證合法性。

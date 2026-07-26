@@ -51,7 +51,7 @@ class LoopConfig(BaseModel):
     num_drafts: int = 3            # 起手 draft 數 (輪流各 encoder; 同 encoder 換 preset)
     debug_prob: float = 0.5        # 每輪以此機率優先除錯 buggy leaf
     max_debug_depth: int = 2       # 連續除錯鏈上限 (超過就放棄該分支)
-    improve_temperature: float = 0.03  # 依指標抽樣的 softmax 溫度; <=0 = greedy 只選最佳
+    improve_temperature: float = 0.2  # 依指標抽樣的 softmax 溫度; <=0 = greedy 只選最佳
     # policy 選完節點後, 讓決策層 (Advisor) 有改選的機會 — 討論/【QA 結論】要求
     # 換 encoder、開新 draft、回頭改某個節點時, 這是唯一能落實的地方。
     # heuristic advisor 一律沿用 policy; 不合法的改選也會被拒絕並沿用 policy。

@@ -26,6 +26,7 @@ from typing import get_args
 
 from flask import Flask, jsonify, redirect, render_template, request
 
+from . import settings as app_settings
 from .. import (auto_finetune, conversation as convo, dataset_analyzer,
                 dataset_ingest, dataset_registry as dsreg,
                 encoder_registry as reg, log_curves, presets as presets_mod)
@@ -63,6 +64,9 @@ def _no_cache(resp):
     resp.headers["Expires"] = "0"
     return resp
 
+
+# 啟動時把設定頁存的 API key 灌進 os.environ, 讓 advisor=llm/skill 直接可用
+app_settings.apply_env()
 
 # 背景訓練工作 (in-memory)
 JOBS: dict[str, dict] = {}
@@ -241,6 +245,7 @@ def index():
         advisors=["llm", "heuristic", "skill"],   # llm 為預設 (下拉第一個)
         run_names=_run_names(),
         modalities=_MODALITIES, anatomies=_ANATOMIES,
+        settings=app_settings.load(),   # 表單預設值取自整體設定
         **_dataset_ctx(),
     )
 
@@ -371,6 +376,23 @@ _HP_FIELDS = [
 ]
 
 
+@app.route("/settings")
+def settings_page():
+    """整體設定頁: API KEY / model / improve_temperature 等新實驗的預設值。"""
+    return render_template(
+        "settings.html", nav="settings", route_seg="settings",
+        fields=app_settings.FIELDS, values=app_settings.load(),
+    )
+
+
+@app.route("/settings/save", methods=["POST"])
+def settings_save():
+    """寫入整體設定並即時套用 (API key 灌進 env)。"""
+    app_settings.save(request.form.to_dict())
+    ref = request.referrer or "."
+    return redirect(f"{ref}{'&' if '?' in ref else '?'}saved=1")
+
+
 @app.route("/presets")
 def presets_page():
     """超參起點編輯頁。"""
@@ -473,20 +495,29 @@ def run():
 def run_full():
     """背景執行完整 pipeline (多 encoder × 改良迴圈 × 多 fold; LoopController)。"""
     f = request.form
+    # 整體設定頁的值當預設; 表單有填的欄位覆寫。model / improve_temperature 無表單
+    # 欄位, 完全由設定頁決定。
+    st = app_settings.load()
     cfg = AgentConfig(data_path=f["data_path"].strip())
-    cfg.advisor.type = f.get("advisor", "heuristic")
+    cfg.advisor.type = f.get("advisor") or st["advisor_type"]
+    cfg.advisor.model = st["model"]
     cfg.advisor.preset = f.get("preset", "default")
     cfg.advisor.guidance = f.get("guidance", "").strip()
     cfg.advisor.allow_code_edit = bool(f.get("allow_code_edit"))
     # 資料圍欄 (docs/data_firewall_design.md): mode 是巨集, strict 會強制關掉
     # allow_code_edit — 這裡設定順序無所謂, AgentConfig 的 validator 會再套一次。
-    cfg.privacy.mode = f.get("privacy_mode", "strict")
+    cfg.privacy.mode = f.get("privacy_mode") or st["privacy_mode"]
     cfg = AgentConfig.model_validate(cfg.model_dump())
-    cfg.loop.num_drafts = int(f.get("num_drafts", 3) or 3)
-    cfg.loop.max_trials = int(f.get("max_trials", 12) or 12)
-    cfg.loop.min_trials = int(f.get("min_trials", 6) or 6)
-    cfg.loop.patience = int(f.get("patience", 4) or 4)
-    cfg.eval.primary_metric = f.get("primary_metric", "score")
+    cfg.loop.num_drafts = int(f.get("num_drafts") or st["num_drafts"])
+    cfg.loop.max_trials = int(f.get("max_trials") or st["max_trials"])
+    cfg.loop.min_trials = int(f.get("min_trials") or st["min_trials"])
+    cfg.loop.patience = int(f.get("patience") or st["patience"])
+    cfg.loop.improve_temperature = st["improve_temperature"]
+    cfg.loop.debug_prob = st["debug_prob"]
+    cfg.loop.max_debug_depth = st["max_debug_depth"]
+    cfg.loop.resume_epochs = st["resume_epochs"]
+    cfg.loop.max_resumes = st["max_resumes"]
+    cfg.eval.primary_metric = f.get("primary_metric") or st["primary_metric"]
     cfg.eval.aggregation = f.get("aggregation", "single")
     cfg.stream_logs = False  # web: 不 tee 到 console; log 檔仍寫, 供輪詢
 
