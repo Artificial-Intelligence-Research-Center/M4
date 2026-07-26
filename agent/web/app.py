@@ -785,6 +785,24 @@ def run_status():
         except Exception:
             folds = None
 
+    # 若這是逐 fold 平行的子執行 (parent/foldN): 附上『父』的 parallel_folds，讓左側
+    # fold 選擇器即使在檢視某個 fold 時也能刷新各 fold 的即時狀態 (running→finished)。
+    if parallel_folds is None:
+        parent_dir = os.path.dirname(run_dir)
+        pfp = os.path.join(parent_dir, "folds.json")
+        if os.path.isfile(pfp):
+            try:
+                with open(pfp, encoding="utf8") as fh:
+                    pj = json.load(fh)
+                subs = {os.path.realpath(os.path.join(parent_dir, e.get("subdir", "")))
+                        for e in pj.get("folds", [])}
+                if pj.get("mode") == "per_fold_parallel" and run_dir in subs:
+                    parallel_folds = {"folds": pj.get("folds") or [],
+                                      "devices": pj.get("devices") or [],
+                                      "done": bool(pj.get("done"))}
+            except Exception:
+                pass
+
     # LLM 完整 prompt/回應記錄 (llm_calls.jsonl); 只回最近 30 筆以控大小
     llm_calls = []
     lcp = os.path.join(run_dir, "llm_calls.jsonl")

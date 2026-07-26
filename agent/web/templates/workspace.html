@@ -618,8 +618,9 @@ async function pollRunStatus(){
   try { j = await (await fetch('run_status/?run='+encodeURIComponent(eff))).json(); }
   catch(e){ _loadbar(false); nb.innerHTML='<div class="banner warn">連線失敗</div>'; return; }
   if(!j.ok){ _loadbar(false); nb.innerHTML='<div class="banner warn">'+(j.error||'錯誤')+'</div>'; return; }
-  // 逐 fold 平行: 檢視父 run 時更新 fold 選擇器 + 顯示各 fold 進程總覽
-  if(onParent) updateFoldSelector(j.parallel_folds);
+  // 逐 fold 平行: 不論在父層或某個 fold, 都刷新左側選擇器的各 fold 即時狀態
+  if(j.parallel_folds) updateFoldSelector(j.parallel_folds);
+  else if(onParent) updateFoldSelector(null);
   if(onParent && j.parallel_folds){
     renderParentOverview(j); _loadedRun=eff; _loadbar(false);
     renderChat(j.conversation||[], j.stopped, j.qa_stream, j.user_facts);
