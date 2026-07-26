@@ -4,6 +4,56 @@
 {% block main_class %}wide{% endblock %}
 {% block body_class %}fixed-h{% endblock %}
 {% block content %}
+<style>
+/* 「新完整流程」— 左分類導覽 ｜ 中選項(垂直; 每列 選項｜說明 二欄) */
+.opt-shell{display:flex;gap:14px;align-items:flex-start;margin-top:10px}
+.opt-nav{flex:0 0 108px;position:sticky;top:8px;display:flex;flex-direction:column;gap:2px}
+.opt-nav a{display:block;padding:6px 10px;font-size:13px;border-radius:8px;color:#374151;
+  cursor:pointer;border:1px solid transparent;white-space:nowrap}
+.opt-nav a:hover{background:#eef2f8;color:#1a4fa0}
+.opt-nav a.active{background:#eaf1fd;border-color:#cfe0fb;color:#1a4fa0;font-weight:600}
+.opt-main{flex:1 1 auto;min-width:0;max-width:860px}
+.opt-sec{display:none}
+.opt-sec.active{display:block}
+.opt-cat-h{font-size:11px;font-weight:700;color:#8a93a2;letter-spacing:.05em;
+  margin:0 0 6px;text-transform:uppercase}
+.opt-cell{border:1px solid #e3e6ea;border-radius:10px;padding:6px 10px 8px;background:#fff;margin:0 0 8px}
+.opt-cell:last-child{margin-bottom:0}
+.opt-cell>legend{font-size:12px;font-weight:600;color:#374151;padding:0 4px}
+/* 二欄表格: 選項 | 說明 */
+.opt-tbl{width:100%;border-collapse:collapse}
+.opt-tbl td{border-top:1px solid #eef1f4;padding:6px 8px;vertical-align:top}
+.opt-tbl tr:first-child td{border-top:none}
+.opt-tbl td.o{width:148px;white-space:nowrap}
+.opt-tbl td.d{color:#444}
+.opt-tbl td.d>*:first-child{margin-top:0}.opt-tbl td.d>*:last-child{margin-bottom:0}
+.opt-tbl td.d h2,.opt-tbl td.d h3{font-size:12.5px;font-weight:700;margin:0 0 .2em;color:#1f2a44}
+.opt-tbl td.d p,.opt-tbl td.d li{font-size:12px;line-height:1.5;margin:.15em 0}
+.opt-tbl td.d ul{padding-left:16px;margin:.2em 0}
+.opt-tbl td.d code{background:#eaeef4;padding:1px 4px;border-radius:4px;font-size:11px}
+.opt-tbl td.d blockquote{border-left:3px solid #cfe0fb;margin:.3em 0;padding:.1em 8px;color:#555}
+/* 選項 chip (縮小; 垂直排列由表格列處理) */
+.opt-main .opt{display:inline-flex;align-items:center;gap:5px;font-size:13px;padding:3px 9px;
+  border:1px solid #e3e6ea;border-radius:999px;cursor:pointer;transition:background .1s,border-color .1s}
+.opt-main .opt:hover{border-color:#9dbcf5}
+.opt-main .opt input{width:auto;margin:0}
+.opt-main .opt:has(input:checked){background:#eaf1fd;border-color:#9dbcf5;color:#1a4fa0;font-weight:600}
+.numlab{display:block;font-size:12px;color:#374151;white-space:normal}
+.numlab input{display:block;width:100%;margin-top:3px}
+.opt-block textarea{width:100%}
+.opt-desc{font-size:12px;color:#555;margin-top:6px}
+.opt-desc>*:first-child{margin-top:0}
+.opt-desc h2,.opt-desc h3{font-size:12.5px;font-weight:700;margin:0 0 .2em;color:#1f2a44}
+.opt-desc p,.opt-desc li{font-size:12px;line-height:1.5;margin:.15em 0}
+.opt-desc ul{padding-left:16px;margin:.2em 0}
+.opt-desc code{background:#eaeef4;padding:1px 4px;border-radius:4px;font-size:11px}
+@media(max-width:1000px){
+  .opt-shell{flex-direction:column}
+  .opt-nav{flex-basis:auto;flex-direction:row;flex-wrap:wrap;position:static}
+  .opt-main{max-width:none}
+  .opt-tbl td.o{width:120px}
+}
+</style>
 <div class="split">
 
   <!-- 左: 決策討論 -->
@@ -60,54 +110,137 @@
     <details class="card" {% if not run_names %}open{% endif %}>
       <summary style="cursor:pointer;font-weight:600;font-size:15px">＋ 新完整流程（多 encoder × 改良迴圈）</summary>
       <form id="form-full" action="run_full/" method="post" style="margin-top:12px">
-        {{ dataset_picker(dataset_groups, default_data, 'dp-full') }}
-        <div class="row">
-          <div><label>決策層 (advisor)</label>
-            <select name="advisor">{% for a in advisors %}<option value="{{ a }}" {{ 'selected' if a == settings.advisor_type }}>{{ a }}</option>{% endfor %}</select></div>
-          <div><label>超參起點</label>
-            <select name="preset">{% for p in presets %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select></div>
-          <div><label>主要指標</label>
-            <select name="primary_metric">
-              {% for m in primary_metrics %}<option value="{{ m }}" {{ 'selected' if settings.primary_metric == m }}>{{ m }}</option>{% endfor %}
-            </select></div>
-          <div><label>多 fold 彙整</label>
-            <select name="aggregation"><option value="single">single</option><option value="mean_std">mean_std</option></select></div>
+        {% macro orow(name, value, label, checked, dockey) -%}
+        <tr><td class="o"><label class="opt"><input type="radio" name="{{ name }}" value="{{ value }}"{{ ' checked' if checked }}> {{ label }}</label></td>
+        <td class="d">{{ (option_docs.get(dockey) or option_docs.get(name) or '')|safe }}</td></tr>
+        {%- endmacro %}
+        <div class="opt-shell">
+
+          <!-- 左: 分類導覽 -->
+          <nav class="opt-nav" id="opt-nav">
+            <a data-cat="dataset" class="active">資料集</a>
+            <a data-cat="decide">決策與起點</a>
+            <a data-cat="eval">評估</a>
+            <a data-cat="loop">搜尋迴圈</a>
+            <a data-cat="privacy">資料圍欄</a>
+            <a data-cat="data">資料特性</a>
+            <button type="submit" class="primary" style="width:100%;margin-top:10px">開始</button>
+          </nav>
+
+          <!-- 中: 所有選項 (垂直排列; 每個選項｜說明 二欄) -->
+          <div class="opt-main" id="opt-main">
+
+            <section class="opt-sec active" data-cat="dataset">
+              <div class="opt-cat-h">資料集</div>
+              <fieldset class="opt-cell" data-field="dataset">
+                {{ dataset_picker(dataset_groups, default_data, 'dp-full') }}
+              </fieldset>
+            </section>
+
+            <section class="opt-sec" data-cat="decide">
+              <div class="opt-cat-h">決策與起點</div>
+              <fieldset class="opt-cell" data-field="advisor">
+                <legend>決策層 (advisor)</legend>
+                <table class="opt-tbl"><tbody>
+                {% for a in advisors %}{{ orow('advisor', a, a, a == settings.advisor_type, 'advisor.' ~ a) }}{% endfor %}
+                </tbody></table>
+              </fieldset>
+              <fieldset class="opt-cell" data-field="preset">
+                <legend>超參起點 (preset)</legend>
+                <table class="opt-tbl"><tbody>
+                {% for p in presets %}{{ orow('preset', p, p, loop.first, 'preset.' ~ p) }}{% endfor %}
+                </tbody></table>
+              </fieldset>
+              <fieldset class="opt-cell" data-field="guidance">
+                <legend>引導方向 (guidance)</legend>
+                <div class="opt-block">
+                  <textarea name="guidance" rows="2" placeholder="例：資料量小且不平衡，優先醫療 DAP encoder + focal loss；先 linear probe 快速篩選。"></textarea>
+                  <div class="opt-desc">{{ option_docs.get('guidance')|safe }}</div>
+                </div>
+              </fieldset>
+            </section>
+
+            <section class="opt-sec" data-cat="eval">
+              <div class="opt-cat-h">評估</div>
+              <fieldset class="opt-cell" data-field="primary_metric">
+                <legend>主要指標 (primary_metric)</legend>
+                <table class="opt-tbl"><tbody>
+                {% for m in primary_metrics %}{{ orow('primary_metric', m, m, settings.primary_metric == m, 'primary_metric.' ~ m) }}{% endfor %}
+                </tbody></table>
+              </fieldset>
+              <fieldset class="opt-cell" data-field="aggregation">
+                <legend>多 fold 彙整 (aggregation)</legend>
+                <table class="opt-tbl"><tbody>
+                {{ orow('aggregation','single','single',True,'aggregation.single') }}
+                {{ orow('aggregation','mean_std','mean_std',False,'aggregation.mean_std') }}
+                </tbody></table>
+              </fieldset>
+            </section>
+
+            <section class="opt-sec" data-cat="loop">
+              <div class="opt-cat-h">搜尋迴圈</div>
+              <fieldset class="opt-cell" data-field="loop">
+                <legend>迴圈參數</legend>
+                <table class="opt-tbl"><tbody>
+                <tr><td class="o"><label class="numlab">起手 drafts<input type="text" name="num_drafts" value="{{ settings.num_drafts }}"></label></td><td class="d">{{ option_docs.get('loop.num_drafts')|safe }}</td></tr>
+                <tr><td class="o"><label class="numlab">max_trials<input type="text" name="max_trials" value="{{ settings.max_trials }}"></label></td><td class="d">{{ option_docs.get('loop.max_trials')|safe }}</td></tr>
+                <tr><td class="o"><label class="numlab">min_trials<input type="text" name="min_trials" value="{{ settings.min_trials }}"></label></td><td class="d">{{ option_docs.get('loop.min_trials')|safe }}</td></tr>
+                <tr><td class="o"><label class="numlab">patience<input type="text" name="patience" value="{{ settings.patience }}"></label></td><td class="d">{{ option_docs.get('loop.patience')|safe }}</td></tr>
+                </tbody></table>
+              </fieldset>
+            </section>
+
+            <section class="opt-sec" data-cat="privacy">
+              <div class="opt-cat-h">資料圍欄</div>
+              <fieldset class="opt-cell" data-field="privacy_mode">
+                <legend>資料圍欄 (privacy)</legend>
+                <table class="opt-tbl"><tbody>
+                {{ orow('privacy_mode','strict','strict',settings.privacy_mode=='strict','privacy_mode.strict') }}
+                {{ orow('privacy_mode','standard','standard',settings.privacy_mode=='standard','privacy_mode.standard') }}
+                {{ orow('privacy_mode','off','off',settings.privacy_mode=='off','privacy_mode.off') }}
+                </tbody></table>
+              </fieldset>
+              <fieldset class="opt-cell" data-field="allow_code_edit">
+                <legend>允許 LLM 修改訓練程式</legend>
+                <div class="opt-block">
+                  <label style="display:flex;align-items:center;gap:6px;font-size:13px" id="code-edit-label">
+                    <input type="checkbox" name="allow_code_edit" value="1" style="width:auto" id="allow-code-edit" disabled>
+                    除錯失敗 trial 與 improve 階段改良 main_finetune.py（隔離副本執行，原始程式不動）
+                  </label>
+                  <div class="opt-desc">{{ option_docs.get('allow_code_edit')|safe }}</div>
+                  <div id="privacy-note" class="muted" style="font-size:12px;margin-top:6px"></div>
+                </div>
+              </fieldset>
+            </section>
+
+            <section class="opt-sec" data-cat="data">
+              <div class="opt-cat-h">資料特性</div>
+              <fieldset class="opt-cell" data-field="modality">
+                <legend>影像模態 (modality)</legend>
+                <table class="opt-tbl"><tbody>
+                {{ orow('modality','','未指定',True,'modality') }}
+                {% for m in modalities %}{{ orow('modality', m, m, False, 'modality.' ~ m) }}{% endfor %}
+                </tbody></table>
+              </fieldset>
+              <fieldset class="opt-cell" data-field="anatomy">
+                <legend>拍攝部位 (anatomy)</legend>
+                <table class="opt-tbl"><tbody>
+                {{ orow('anatomy','','未指定',True,'anatomy') }}
+                {% for a in anatomies %}{{ orow('anatomy', a, a, False, 'anatomy.' ~ a) }}{% endfor %}
+                </tbody></table>
+              </fieldset>
+              <fieldset class="opt-cell" data-field="class_ordinal">
+                <legend>類別是否有序 (class_ordinal)</legend>
+                <table class="opt-tbl"><tbody>
+                {{ orow('class_ordinal','','未指定',True,'class_ordinal') }}
+                {{ orow('class_ordinal','1','是（有序）',False,'class_ordinal.ordinal') }}
+                {{ orow('class_ordinal','0','否（名目）',False,'class_ordinal.nominal') }}
+                </tbody></table>
+              </fieldset>
+            </section>
+
+          </div>
         </div>
-        <div class="row">
-          <div><label>起手 drafts（跨 encoder）</label><input type="text" name="num_drafts" value="{{ settings.num_drafts }}"></div>
-          <div><label>max_trials（總輪數上限）</label><input type="text" name="max_trials" value="{{ settings.max_trials }}"></div>
-          <div><label title="至少完成這麼多輪才允許 patience 提早停">min_trials（至少輪數）</label><input type="text" name="min_trials" value="{{ settings.min_trials }}"></div>
-          <div><label title="連續這麼多輪 improve/resume 無提升才停；draft/debug 不計">patience（無提升容忍）</label><input type="text" name="patience" value="{{ settings.patience }}"></div>
-        </div>
-        <div class="row">
-          <div><label title="LLM 看不到任何原始資料；strict 另外禁止修改訓練程式，避免經由 log 回讀資料">資料圍欄</label>
-            <select name="privacy_mode" id="privacy-mode" onchange="onPrivacyMode()">
-              <option value="strict" {{ 'selected' if settings.privacy_mode == 'strict' }}>strict（預設：LLM 完全看不到資料，且不可改程式）</option>
-              <option value="standard" {{ 'selected' if settings.privacy_mode == 'standard' }}>standard（可改程式；原始 log 仍不回饋給 LLM）</option>
-              <option value="off" {{ 'selected' if settings.privacy_mode == 'off' }}>off（關閉圍欄，不建議）</option>
-            </select></div>
-          <div><label title="LLM 不從資料夾名稱猜測，由你指定">影像模態</label>
-            <select name="modality"><option value="">未指定</option>
-              {% for m in modalities %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select></div>
-          <div><label>拍攝部位</label>
-            <select name="anatomy"><option value="">未指定</option>
-              {% for a in anatomies %}<option value="{{ a }}">{{ a }}</option>{% endfor %}</select></div>
-          <div><label title="類別之間是否有程度順序（例：DR 分級 0-4）">類別是否有序</label>
-            <select name="class_ordinal"><option value="">未指定</option>
-              <option value="1">是（有序）</option><option value="0">否（名目）</option></select></div>
-        </div>
-        <div id="privacy-note" class="muted" style="font-size:12px;margin:-2px 0 8px">
-          資料圍欄：LLM 看不到影像、檔名、路徑與真實類別名（資料集以假名 <code>DS-…</code>、類別以 <code>C0…Cn</code> 表示）。
-          它需要資料特性時，只能點名執行本地分析器，或直接問你。
-        </div>
-        <label>引導方向 (guidance)</label>
-        <textarea name="guidance" rows="2" placeholder="例：資料量小且不平衡，優先醫療 DAP encoder + focal loss；先 linear probe 快速篩選。"></textarea>
-        <div class="muted" style="font-size:11px;margin:-4px 0 6px">⚠ 這段文字會原文送到 Claude API，請勿貼上病人資訊或檔案路徑。</div>
-        <label style="display:flex;align-items:center;gap:6px;margin:8px 0" id="code-edit-label">
-          <input type="checkbox" name="allow_code_edit" value="1" style="width:auto" id="allow-code-edit" disabled>
-          允許 LLM 修改訓練程式（除錯失敗 trial 時，以及 improve 階段改良 main_finetune.py；修改版隔離在 run 目錄下執行，原始程式不會被改動）
-        </label>
-        <button type="submit" class="primary">開始完整流程</button>
       </form>
     </details>
     <div id="nb"><div class="muted">右方是 notebook：選一個 run（左上）或開新流程後，這裡即時顯示設定、進行中 trial、histogram、各 trial 參數與曲線、report。</div></div>
@@ -482,24 +615,44 @@ async function pollRunStatus(){
 // ---- 聊天 ----
 // 資料圍欄: strict 模式不允許 LLM 改訓練程式 (寫入權 + log 回讀 = 完整讀取通道)
 function onPrivacyMode(){
-  const m=document.getElementById('privacy-mode'), cb=document.getElementById('allow-code-edit');
+  const r=document.querySelector('input[name=privacy_mode]:checked');
+  const cb=document.getElementById('allow-code-edit');
   const note=document.getElementById('privacy-note'), lab=document.getElementById('code-edit-label');
-  if(!m||!cb) return;
-  const strict = m.value==='strict';
+  if(!r||!cb) return;
+  const strict = r.value==='strict';
   cb.disabled = strict;
   if(strict) cb.checked=false;
   if(lab) lab.style.opacity = strict?0.5:1;
   if(note){
-    if(m.value==='off'){
+    if(r.value==='off'){
       note.innerHTML='<span style="color:#b42318">⚠ 圍欄已關閉：資料集路徑、真實類別名與原始訓練 log 都會送到 Claude API。</span>';
-    }else if(m.value==='standard'){
+    }else if(r.value==='standard'){
       note.innerHTML='standard：LLM 仍看不到影像與路徑，但可以修改 <code>main_finetune.py</code>。原始 log 不會回饋給它。';
     }else{
-      note.innerHTML='資料圍欄：LLM 看不到影像、檔名、路徑與真實類別名（資料集以假名 <code>DS-…</code>、類別以 <code>C0…Cn</code> 表示）。它需要資料特性時，只能點名執行本地分析器，或直接問你。';
+      note.innerHTML='strict：LLM 看不到影像、檔名、路徑與真實類別名，且不可改程式。';
     }
   }
 }
 document.addEventListener('DOMContentLoaded', onPrivacyMode);
+
+// ---- 分類導覽 + 選項變更 (說明已內嵌在每列右欄, 不再需要說明面板) ----
+(function(){
+  const main=document.getElementById('opt-main'); if(!main) return;
+  main.addEventListener('change', e=>{ if(e.target.name==='privacy_mode') onPrivacyMode(); });
+
+  // 左側分類導覽: 分頁切換 (一次只顯示一類; 所有欄位仍在同一表單一起送出)
+  const nav=document.getElementById('opt-nav');
+  const links=nav?[...nav.querySelectorAll('a[data-cat]')]:[];
+  const secs=[...main.querySelectorAll('.opt-sec')];
+  function showCat(cat){
+    secs.forEach(s=>s.classList.toggle('active', s.getAttribute('data-cat')===cat));
+    links.forEach(a=>a.classList.toggle('active', a.getAttribute('data-cat')===cat));
+  }
+  if(nav) nav.addEventListener('click', e=>{
+    const a=e.target.closest('a[data-cat]'); if(!a) return;
+    e.preventDefault(); showCat(a.getAttribute('data-cat'));
+  });
+})();
 
 // 出口稽核摘要: 這個 run 送出過幾次、有沒有被圍欄攔下來
 function renderPrivacy(p){

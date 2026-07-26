@@ -26,6 +26,7 @@ from typing import get_args
 
 from flask import Flask, jsonify, redirect, render_template, request
 
+from . import optdocs as app_optdocs
 from . import settings as app_settings
 from .. import (auto_finetune, conversation as convo, dataset_analyzer,
                 dataset_ingest, dataset_registry as dsreg,
@@ -247,6 +248,7 @@ def index():
         modalities=_MODALITIES, anatomies=_ANATOMIES,
         settings=app_settings.load(),   # 表單預設值取自整體設定
         primary_metrics=app_settings.PRIMARY_METRICS,
+        option_docs=app_optdocs.load(),  # 表單各選項的 markdown 說明 (右側面板)
         **_dataset_ctx(),
     )
 
