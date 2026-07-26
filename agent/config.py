@@ -100,11 +100,21 @@ class EnsembleConfig(BaseModel):
     重用各 trial 已落地的 predictions_*.csv, 不重訓、不需 GPU。勝過最佳單模型
     才採用為交付。權重最佳化一律在 val 上進行 (test 只報告), 杜絕洩漏。"""
     enabled: bool = True
-    method: Literal["equal", "val_weighted"] = "val_weighted"  # 等權 / 依 val 加權
+    # equal=等權軟投票; val_weighted=依 val 求權重; stacking=val 上訓練 meta-learner
+    method: Literal["equal", "val_weighted", "stacking"] = "val_weighted"
+    # 成員選擇是否用 LLM (獨立於 advisor.type): False=一律規則式選擇 (heuristic);
+    # True=用 LLM 依 TrialFacts 選成員 (主 advisor 非 LLM 時會另建專用 LLMAdvisor;
+    # 環境不可用則自動退回 heuristic)。見 docs/ensemble_design.md。
+    llm_select: bool = False
     min_members: int = 2           # 至少幾個成員才組 ensemble
     max_members: int = 4           # 最多納入幾個成員 (過多會攤薄強成員)
     member_delta: float = 0.05     # 成員門檻: primary ≥ 最佳單模型 − 此值
     require_diverse_encoders: bool = True  # 優先涵蓋不同 encoder (去相關)
+    # 方案 B: 搜尋『中』的 ensemble stage — 單模型改良進入平坦期時, 中途即組 ensemble,
+    # 並隨模型池成長重複嘗試 (結果獨立追蹤, 不干擾單模型樹搜尋的 best/parent 機制)。
+    in_search: bool = False        # 開/關方案 B (預設只在收尾集成 = 方案 A)
+    search_patience: int = 2       # 連續無提升的改良輪數達此值 → 觸發一次搜尋中集成
+    max_search_ensembles: int = 3  # 全 run 搜尋中集成次數上限 (避免每輪重跑)
 
 
 class PrivacyConfig(BaseModel):

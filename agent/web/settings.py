@@ -32,6 +32,22 @@ FIELDS: list[tuple] = [
     ("max_resumes", "max_resumes（同分支續訓上限）", "int", 2, None),
     ("privacy_mode", "資料圍欄 (privacy)", "choice", "strict", ["strict", "standard", "off"]),
     ("primary_metric", "主要指標 (primary_metric)", "str", "score", None),
+    # ---- 集成 (ensemble; docs/ensemble_design.md) ----
+    ("ensemble_enabled", "集成 enabled（收尾把多模型組 ensemble）",
+     "choice", "true", ["true", "false"]),
+    ("ensemble_method", "集成方法 method",
+     "choice", "val_weighted", ["equal", "val_weighted", "stacking"]),
+    ("ensemble_llm_select", "集成成員用 LLM 選（關＝heuristic，獨立於 advisor）",
+     "choice", "false", ["true", "false"]),
+    ("ensemble_min_members", "集成 min_members（至少幾個成員）", "int", 2, None),
+    ("ensemble_max_members", "集成 max_members（最多幾個成員）", "int", 4, None),
+    ("ensemble_member_delta", "集成 member_delta（成員門檻：best − 此值）",
+     "float", 0.05, None),
+    ("ensemble_in_search", "搜尋中集成 in_search（方案B：平坦期即中途組）",
+     "choice", "false", ["true", "false"]),
+    ("ensemble_search_patience", "搜尋中集成 search_patience（觸發的無提升輪數）",
+     "int", 2, None),
+    ("ensemble_max_search_ensembles", "搜尋中集成次數上限", "int", 3, None),
 ]
 
 _DEFAULTS = {k: d for k, _l, _t, d, _c in FIELDS}

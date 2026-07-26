@@ -80,11 +80,16 @@ ensemble:                                  # 收尾集成 (docs/ensemble_design.
   # 樹搜尋停止後, 把多個已訓練 trial 以機率軟投票組成 ensemble; 重用各 trial 已落地的
   # predictions_*.csv, 不重訓、不需 GPU。勝過最佳單模型才採用為交付。
   enabled: true
-  method: val_weighted                     # equal (等權) | val_weighted (依 val 求權重)
+  method: val_weighted                     # equal (等權) | val_weighted (依 val 求權重) | stacking (val 上訓練 meta-learner)
+  llm_select: false                        # 成員選擇是否用 LLM (獨立於 advisor.type); false=規則式選擇, 環境不可用會自動退回
   min_members: 2                           # 至少幾個成員才組
   max_members: 4                           # 最多納入幾個 (過多攤薄強成員)
   member_delta: 0.05                       # 成員門檻: primary ≥ 最佳單模型 − 此值
   require_diverse_encoders: true           # 優先涵蓋不同 encoder (去相關)
+  # 方案 B: 搜尋『中』的 ensemble stage — 改良進入平坦期即中途組 ensemble, 隨池成長重試
+  in_search: false                         # 開/關方案 B (預設僅收尾集成 = 方案 A)
+  search_patience: 2                       # 連續無提升改良輪數達此值 → 觸發一次搜尋中集成
+  max_search_ensembles: 3                  # 全 run 搜尋中集成次數上限
 
 device: 0
 dry_run: false

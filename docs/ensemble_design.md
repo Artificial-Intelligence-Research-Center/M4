@@ -1,6 +1,6 @@
 # MedClaw 模型集成 (Ensemble) — 設計文件
 
-- 狀態：v0.2 — **方案 A 最小可用版已實作**（等權 / val 加權 + heuristic 選成員 + 收尾集成 + 報告）；LLM 選成員、stacking、方案 B 樹整合待做
+- 狀態：v0.3 — **已實作**：方案 A 收尾集成、equal / val_weighted / **stacking**、**LLM 選成員**（facts 驅動、假名反查）、**方案 B 搜尋中集成**（plateau 觸發、隨池成長重試）。方案 B 採「集成結果獨立追蹤」而非「可再變異的樹節點」（後者仍為 future，見 §8）。
 - 適用範圍：`agent/` 自動微調 Agent（MedClaw）的多模型集成
 - 相關文件：[auto_finetune_agent_design.md](auto_finetune_agent_design.md)、[data_firewall_design.md](data_firewall_design.md)、[model_registry_design.md](model_registry_design.md)
 - 相關程式：`agent/evaluator.py`、`agent/metric_registry.py`、`agent/loop_controller.py`、`agent/journal.py`、`agent/llm_advisor.py`、`agent/schemas.py`、`engine_finetune.py`
@@ -128,9 +128,15 @@ def combine(run_dir, members: list[TrialResult], spec: EnsembleSpec,
 def propose_ensemble(self, profile, history: list[TrialResult]) -> Optional[EnsembleSpec]: ...
 ```
 
-- **LLMAdvisor**：prompt 帶 `history` 的 `TrialFacts`（既有 `_hist`），指示「若有 ≥2 個夠強且多樣的成員，選出成員與方法；否則回 None」。輸出經 `EnsembleSpec` 驗證，成員 id 必須在 `history` 內（白名單，防幻覺）。權重不由 LLM 憑空給；`val_weighted` 交本地求解。
+- **LLMAdvisor**：prompt 帶 `history` 的 `TrialFacts`（既有 `_hist`），指示「若有 ≥2 個夠強且多樣的成員，選出成員與方法；否則 do_ensemble=false」。LLM 只看到**假名 trial_id**、也只回傳假名；本地以 `redact.resolve_trial_ids`（假名反查表）還原成真實 id 並白名單過濾（防幻覺）。權重不由 LLM 憑空給；`val_weighted`/`stacking` 交本地在 val 上求解。
 - **HeuristicAdvisor**：val top-K + encoder 去重的規則版。
-- 回 `None` 表示「此刻不值得集成」，迴圈照常。
+- 回 `None`／`do_ensemble=false` 表示「此刻不值得集成」，迴圈照常。
+
+**成員選擇是否用 LLM — 獨立開關 `ensemble.llm_select`（已實作）**：與 `advisor.type` **解耦**。
+- `llm_select=false`（預設）→ **一律規則式選擇**，即使主 advisor 是 LLM 也不用 LLM 選成員。
+- `llm_select=true` → 用 LLM 選：主 advisor 是 LLM/Skill 時直接用其 `propose_ensemble`；主 advisor 是 heuristic 時**另建專用 `LLMAdvisor`**（共用 privacy）。LLM 環境不可用或回 None 時**自動退回規則式**（`loop_controller._select_ensemble_members`）。
+
+**UI 控制**：全部集成參數（`enabled` / `method` / `llm_select` / `min_members` / `max_members` / `member_delta` / `in_search` / `search_patience` / `max_search_ensembles`）皆列於 Web「設定」頁（`agent/web/settings.py` 的 `FIELDS`），新實驗啟動時由 `app.run_full` 套進 `cfg.ensemble`。
 
 ---
 
@@ -147,10 +153,12 @@ def propose_ensemble(self, profile, history: list[TrialResult]) -> Optional[Ense
 
 優點：改動小、零 GPU、不觸碰既有 draft/improve/debug/resume 流程；風險低。
 
-### 方案 B：一等公民的 `ensemble` 節點（擴充）
-把 `ensemble` 加入 `Stage`，成為 policy／決策層可在**搜尋中途**選擇的動作：單模型改良連續 `patience` 輪無提升時，policy 以一定機率提出集成節點；`EnsembleResult` 作為節點進 journal，可再被納入更高階集成（集成的集成需防過擬合，設深度上限）。
+### 方案 B：搜尋『中』集成（**已實作**）
+`ensemble.in_search=true` 時，單模型改良連續 `search_patience` 輪無提升（`stale`）且模型池較上次成長，即在搜尋**中途**觸發一次集成回合（全 run 上限 `max_search_ensembles`）。集成隨模型池累積而重試，越後面成員越多、越可能勝出。
 
-優點：更自動、更強；代價：`journal.Node`／`_search_policy`／`review_search_choice` 需支援無單一 encoder 的節點型別，改動較大。建議在方案 A 驗證有效後再做。
+**實作取捨**：集成結果**獨立追蹤**（`self.ensembles` / `self.ensemble`），**不**塞進 journal 的 Node／`best`／parent 機制——如此單模型樹搜尋的正確性（`get_best_node`、改良選點、多 fold 重跑）完全不受影響，ensemble 也不會被誤選為改良基準。`Stage` 已加入 `"ensemble"` 以供標記。
+
+**仍為 future**：讓 `EnsembleResult` 成為**可再被變異／再被集成的樹節點**（集成的集成，需防過擬合並設深度上限）——這需要 `journal.Node`／`_search_policy` 支援無單一 encoder 的節點型別，改動較大，暫不做。
 
 ---
 

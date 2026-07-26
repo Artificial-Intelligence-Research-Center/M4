@@ -171,6 +171,29 @@ def _optimize_weights(val_probs: list, y_true_val, cfg: EvalConfig) -> list:
         return equal
 
 
+def _stacking(val_probs: list, y_true_val, test_probs: list, n_cls: int):
+    """堆疊 (meta-learner): 以各成員 val 機率為特徵訓練 LogisticRegression,
+    在 test 特徵上輸出集成機率 [N, n_cls]。
+
+    ⚠ 僅在 val 上擬合 (test 不參與), 杜絕洩漏。val 類別不全時對齊回完整 n_cls。
+    失敗 (單類別/退化) 由呼叫端 catch 後退回等權。
+    """
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    x_val = np.hstack(val_probs)                      # [Nval, M*C]
+    x_test = np.hstack(test_probs)                    # [Ntest, M*C]
+    y_val = np.asarray(y_true_val).astype(int)
+    clf = LogisticRegression(max_iter=1000)
+    clf.fit(x_val, y_val)
+    proba = clf.predict_proba(x_test)                 # [Ntest, len(clf.classes_)]
+    # 對齊回完整類別索引 (val 若缺某類, predict_proba 不含該欄)
+    out = np.zeros((x_test.shape[0], n_cls), dtype=float)
+    for j, c in enumerate(clf.classes_):
+        if 0 <= int(c) < n_cls:
+            out[:, int(c)] = proba[:, j]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 成員選擇 (heuristic; LLM 版之後再加)
 # ---------------------------------------------------------------------------
@@ -180,7 +203,8 @@ def select_members_heuristic(history: list[TrialResult], cfg) -> Optional[Ensemb
     cfg = EnsembleConfig。回傳 None 表示不值得集成 (成員不足)。
     以 primary_score (test) 選成員, 與系統既有 self.best 一致; 權重才在 val 上求。
     """
-    done = [t for t in history if t.status == "done"]
+    done = [t for t in history if t.status == "done"
+            and t.recipe.encoder.model_key != "ensemble"]   # 不集成 ensemble
     if len(done) < cfg.min_members:
         return None
     ranked = sorted(done, key=lambda t: t.primary_score, reverse=True)
@@ -238,17 +262,36 @@ def combine(members: list[TrialResult], spec: EnsembleSpec, cfg: EvalConfig,
     except Exception as e:                        # noqa: BLE001
         return _fail(f"讀取 test predictions 失敗: {e}")
 
-    # 權重: equal 直接均權; val_weighted 在 val 上最佳化 (val 對齊失敗則退等權)
+    # val 對齊 (val_weighted / stacking 需要; 缺失或不對齊則退回等權)
     n = len(test_probs)
+    n_cls = test_probs[0].shape[1]
     weights = [1.0 / n] * n
-    if spec.method == "val_weighted":
+    val_probs = y_true_val = None
+    if spec.method in ("val_weighted", "stacking"):
         try:
             y_true_val, val_probs = _align(trials_dir, tids, "val")
-            weights = _optimize_weights(val_probs, y_true_val, cfg)
         except Exception:
-            weights = [1.0 / n] * n               # val 缺失/不對齊 → 退回等權
+            val_probs = None
 
-    ens_prob = _weighted(test_probs, weights)
+    method_used = spec.method
+    if spec.method == "stacking" and val_probs is not None:
+        try:
+            ens_prob = _stacking(val_probs, y_true_val, test_probs, n_cls)
+            spec.weights = None                   # stacking 無單一權重向量
+        except Exception:
+            ens_prob = _weighted(test_probs, weights)   # 退回等權
+            spec.weights = [round(1.0 / n, 4)] * n
+            method_used = "equal(stacking退回)"
+    elif spec.method == "val_weighted" and val_probs is not None:
+        weights = _optimize_weights(val_probs, y_true_val, cfg)
+        ens_prob = _weighted(test_probs, weights)
+        spec.weights = [round(float(w), 4) for w in weights]
+    else:                                         # equal, 或 val 缺失退回等權
+        ens_prob = _weighted(test_probs, weights)
+        spec.weights = [round(1.0 / n, 4)] * n
+        if spec.method != "equal":
+            method_used = f"equal({spec.method}退回:無val)"
+
     metrics = _clf_metrics(y_true, ens_prob)
 
     # 落地集成 predictions_test.csv (供報告/復現/自訂 primary 計算)
@@ -270,10 +313,10 @@ def combine(members: list[TrialResult], spec: EnsembleSpec, cfg: EvalConfig,
                 metrics[real] = v
 
     primary = ev.compute_primary(metrics, cfg, task_dir=out_dir, mode="test")
-    spec.weights = [round(float(w), 4) for w in weights]
 
     return EnsembleResult(
         ensemble_id=ens_id, spec=spec, metrics=metrics, primary_score=primary,
         member_ckpts=[by_id[t].ckpt_path for t in tids if by_id.get(t) and by_id[t].ckpt_path],
         pred_path=pred_path, n_samples=int(len(y_true)), status="done",
-        message=f"{n} 成員 · method={spec.method} · weights={spec.weights}")
+        message=f"{n} 成員 · method={method_used}"
+                + (f" · weights={spec.weights}" if spec.weights else ""))

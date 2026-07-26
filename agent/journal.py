@@ -10,7 +10,7 @@ from typing import Literal, Optional
 
 from .schemas import Recipe, TrialResult
 
-Stage = Literal["draft", "improve", "debug", "resume"]
+Stage = Literal["draft", "improve", "debug", "resume", "ensemble"]
 
 
 class Node:
@@ -110,7 +110,7 @@ class Journal:
         for t in trials:
             s = (t.recipe.provenance or {}).get("search") or {}
             stage = s.get("stage", "draft")
-            if stage not in ("draft", "improve", "debug", "resume"):
+            if stage not in ("draft", "improve", "debug", "resume", "ensemble"):
                 stage = "draft"
             parent = by_id.get(s.get("parent")) if s.get("parent") else None
             node = Node(t.recipe, parent=parent, stage=stage)

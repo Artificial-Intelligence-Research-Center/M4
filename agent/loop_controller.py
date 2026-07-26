@@ -81,7 +81,11 @@ class LoopController:
         self._t0 = 0.0
         self.n_trials = 0
         self.best: Optional[TrialResult] = None
-        self.ensemble = None    # 收尾集成結果 (EnsembleResult), 見 _maybe_ensemble
+        self.ensemble = None    # 最佳集成結果 (EnsembleResult) — 跨所有集成回合
+        self.ensembles: list = []          # 全部集成回合 (方案A收尾 + 方案B搜尋中)
+        self._n_search_ens = 0             # 已執行的搜尋中集成次數 (方案B 上限用)
+        self._last_ens_pool = 0            # 上次搜尋中集成時的模型池大小 (避免每輪重跑)
+        self._ens_llm = None               # 專用 LLM 成員選擇器 (llm_select 且主 advisor 非 LLM 時)
         self._stopped = False   # 使用者/LLM 中斷
         self.journal: Optional[Journal] = None  # 全域解答樹 (落地 search_tree.json)
         self._last_gpu_stats: dict = {}  # 最近一個 trial 的 GPU 取樣 (draft 的 boost 依據)
@@ -885,6 +889,21 @@ class LoopController:
                     done_msg += "（偏低，下一輪將自動調整）"
             self._say("system", done_msg, kind="status", round=k, trial_id=task_id)
 
+            # 方案B: 搜尋『中』集成 — 改良進入平坦期 + 模型池較上次成長 → 中途組 ensemble
+            ec = self.cfg.ensemble
+            if (getattr(ec, "enabled", False) and getattr(ec, "in_search", False)
+                    and not self.cfg.dry_run and stale >= ec.search_patience
+                    and self._n_search_ens < ec.max_search_ensembles):
+                pool = sum(1 for t in history if t.status == "done"
+                           and t.recipe.encoder.model_key != "ensemble")
+                if pool >= ec.min_members and pool > self._last_ens_pool:
+                    self._last_ens_pool = pool
+                    self._n_search_ens += 1
+                    try:
+                        self._run_ensemble_round(profile, history, f"t{k}")
+                    except Exception as e:               # noqa: BLE001
+                        self._say("system", f"搜尋中集成失敗（{e}）。", kind="status")
+
             if len(history) >= scfg.min_trials and stale >= scfg.patience:
                 msg = (f"已完成 {len(history)} 輪（≥ min_trials={scfg.min_trials}），"
                        f"且連續 {stale} 輪改良/續訓無提升"
@@ -895,34 +914,63 @@ class LoopController:
                 break
         return history
 
-    # ---- 收尾集成 (docs/ensemble_design.md 方案 A) ----------------------
-    def _maybe_ensemble(self, profile: DatasetProfile,
-                        history: list[TrialResult]):
-        """樹搜尋停止後, 嘗試把多個已訓練 trial 組成機率軟投票 ensemble。
+    # ---- 集成 (docs/ensemble_design.md) --------------------------------
+    def _select_ensemble_members(self, profile: DatasetProfile,
+                                 history: list[TrialResult], ec):
+        """選集成成員 — 由 `ensemble.llm_select` 決定, **獨立於 advisor.type**。
 
-        重用各 trial 已落地的 predictions_*.csv (不重訓)。勝過最佳單模型才採用。
-        資料圍欄: 決策層只選成員 trial_id + 方法; 平均在 ensembler (資料平面) 執行。
+        llm_select=False → 一律規則式選擇 (即使主 advisor 是 LLM)。
+        llm_select=True  → 用 LLM 依 TrialFacts 選 (主 advisor 非 LLM 時另建專用
+        LLMAdvisor); LLM 不可用或回 None 時自動退回規則式。
+        """
+        if getattr(ec, "llm_select", False):
+            adv = self._ensemble_llm_advisor()
+            if adv is not None:
+                try:
+                    spec = adv.propose_ensemble(profile, history, ec)
+                    if spec is not None:
+                        return spec
+                except Exception as e:                   # noqa: BLE001
+                    self._say("system", f"LLM 選集成成員失敗（{e}），改用規則式選擇。",
+                              kind="status")
+        return ensembler.select_members_heuristic(history, ec)
+
+    def _ensemble_llm_advisor(self):
+        """回傳能做 LLM 成員選擇的 advisor (獨立於主 advisor.type); 不可用回 None。"""
+        from .advisor import HeuristicAdvisor
+        from .llm_advisor import LLMAdvisor
+        # 主 advisor 本身就是 LLM/Skill → 直接用其 propose_ensemble
+        if (not isinstance(self.advisor, HeuristicAdvisor)
+                and hasattr(self.advisor, "propose_ensemble")):
+            return self.advisor
+        # 主 advisor 是 heuristic → 視需要建一個專用 LLMAdvisor (共用 privacy context)
+        if self._ens_llm is None:
+            try:
+                adv = LLMAdvisor(model=self.cfg.advisor.model, privacy=self.privacy)
+                adv.check_environment()
+                self._ens_llm = adv
+            except Exception as e:                       # noqa: BLE001
+                self._say("system", f"LLM 選成員不可用（{e}），改用規則式選擇。",
+                          kind="status")
+                self._ens_llm = False                    # 快取失敗, 不重試
+        return self._ens_llm or None
+
+    def _run_ensemble_round(self, profile: DatasetProfile,
+                            history: list[TrialResult], tag: str):
+        """執行一次集成 (方案A收尾 / 方案B搜尋中共用)。回傳 EnsembleResult 或 None。
+
+        重用各 trial 已落地的 predictions_*.csv (不重訓)。資料圍欄: 決策層只選成員
+        trial_id + 方法; 機率平均在 ensembler (資料平面) 執行, 只有彙整指標回流。
         """
         ec = self.cfg.ensemble
-        if not getattr(ec, "enabled", False) or self.cfg.dry_run:
-            return None
-        done = [t for t in history if t.status == "done"]
+        done = [t for t in history if t.status == "done"
+                and t.recipe.encoder.model_key != "ensemble"]
         if len(done) < ec.min_members:
             return None
 
-        # 選成員: 決策層 propose_ensemble (無則退回 heuristic 規則)
-        spec = None
-        proposer = getattr(self.advisor, "propose_ensemble", None)
-        if proposer is not None:
-            try:
-                spec = proposer(profile, history, ec)
-            except Exception as e:                       # noqa: BLE001
-                self._say("system", f"決策層選集成成員失敗（{e}），改用規則式選擇。",
-                          kind="status")
-        if spec is None:
-            spec = ensembler.select_members_heuristic(history, ec)
+        # 選成員: 由 ensemble.llm_select 決定 (獨立於 advisor.type), 見 _select_ensemble_members
+        spec = self._select_ensemble_members(profile, history, ec)
         if spec is None or len(spec.member_trial_ids) < ec.min_members:
-            self._say("system", "可用成員不足（多樣性/門檻），略過集成。", kind="status")
             return None
 
         by_id = {t.trial_id: t for t in done}
@@ -930,32 +978,43 @@ class LoopController:
         if len(members) < ec.min_members:
             return None
         self._say("system",
-                  f"開始集成 {len(members)} 個模型（method={spec.method}）："
+                  f"集成 {len(members)} 個模型（method={spec.method}，{tag}）："
                   + "、".join(m.trial_id for m in members) + "…", kind="status")
 
-        out_dir = os.path.join(self.run_dir, "ensembles", "ensemble")
+        out_dir = os.path.join(self.run_dir, "ensembles", f"ensemble_{tag}")
         result = ensembler.combine(members, spec, self.eval_cfg,
                                    self.trials_dir, out_dir)
         if result.status != "done":
             self._say("system", f"集成未完成：{result.message}", kind="status")
             return None
 
+        self.ensembles.append(result)
+        if self.ensemble is None or result.primary_score > self.ensemble.primary_score:
+            self.ensemble = result                       # 追蹤跨回合最佳集成
+
         best_single = self.best.primary_score if self.best else None
         pm = self.cfg.eval.primary_metric
         if best_single is not None and result.primary_score > best_single:
-            gain = result.primary_score - best_single
             self._say("llm",
-                      f"集成勝出：{len(members)} 模型軟投票 primary({pm})="
+                      f"集成勝出（{tag}）：{len(members)} 模型 primary({pm})="
                       f"{result.primary_score:.4f}，勝過最佳單模型 {best_single:.4f}"
-                      f"（+{gain:.4f}）。權重={result.spec.weights}。已採用為交付。",
-                      kind="final")
+                      f"（+{result.primary_score - best_single:.4f}）。"
+                      f"權重={result.spec.weights}。", kind="decision")
         else:
             self._say("llm",
-                      f"集成 primary({pm})={result.primary_score:.4f}"
-                      + (f"，未勝過最佳單模型 {best_single:.4f}，維持單模型交付。"
-                         if best_single is not None else "。"),
-                      kind="final")
+                      f"集成（{tag}）primary({pm})={result.primary_score:.4f}"
+                      + (f"，未勝過最佳單模型 {best_single:.4f}。"
+                         if best_single is not None else "。"), kind="decision")
         return result
+
+    def _maybe_ensemble(self, profile: DatasetProfile,
+                        history: list[TrialResult]):
+        """方案A: 收尾集成 (實驗停止後, 對全部模型池組一次)。回傳最佳集成。"""
+        ec = self.cfg.ensemble
+        if not getattr(ec, "enabled", False) or self.cfg.dry_run:
+            return self.ensemble
+        self._run_ensemble_round(profile, history, "final")
+        return self.ensemble
 
     def _say(self, role: str, text: str, kind: str = "msg", **extra) -> None:
         conversation.append(self.run_dir, role, text, kind=kind, **extra)

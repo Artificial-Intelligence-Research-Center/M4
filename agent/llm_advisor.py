@@ -39,8 +39,8 @@ from .privacy.context import PrivacyContext
 from .privacy.facts import AnalysisFacts, ErrorFacts, UserFacts
 from .privacy.facts import UserQuestion as _UQ
 from .schemas import (
-    ComponentRef, DatasetProfile, EncoderChoice, HeadSpec, HyperParams,
-    InfoRequest, NextAction, Recipe, SearchOverride, TrialResult,
+    ComponentRef, DatasetProfile, EncoderChoice, EnsembleSpec, HeadSpec,
+    HyperParams, InfoRequest, NextAction, Recipe, SearchOverride, TrialResult,
 )
 
 _MODEL = "claude-opus-4-8"
@@ -152,6 +152,14 @@ class _SearchChoice(BaseModel):
     adaptation: Optional[Literal["finetune", "lp"]] = None
     preset: Optional[str] = None
     reason: str = ""
+
+
+class _EnsemblePick(_InfoMixin):
+    """propose_ensemble 的回應 — 選成員 (aliased trial_id) + 集成方法。"""
+    do_ensemble: bool = False               # 是否值得集成 (成員 <2 或不值得 → false)
+    member_trial_ids: list[str] = Field(default_factory=list)  # 成員的 (假名) trial_id
+    method: Literal["equal", "val_weighted", "stacking"] = "val_weighted"
+    rationale: str = ""
 
 
 class _DebugDecision(_InfoMixin):
@@ -557,6 +565,44 @@ class LLMAdvisor:
         return NextAction(stop=d.stop or next_recipe is None, reason=d.reason,
                           mutation=d.mutation, next_recipe=next_recipe,
                           info=self.last_info)
+
+    # ---- 收尾/搜尋中集成: 選成員 (docs/ensemble_design.md) ------------
+    def propose_ensemble(self, profile: DatasetProfile,
+                         history: list[TrialResult],
+                         ensemble_cfg) -> Optional[EnsembleSpec]:
+        """看 TrialFacts 選 ≥2 個夠強且多樣的成員組 ensemble; 不值得則回 None。
+
+        ⚠ 資料圍欄: LLM 只看到假名 trial_id, 回傳假名; 本地以反查表還原成真實 id
+        (白名單, 防幻覺)。實際機率平均在 agent/ensembler (資料平面) 執行。
+        """
+        done = [t for t in history if t.status == "done"
+                and t.recipe.encoder.model_key != "ensemble"]
+        if len(done) < ensemble_cfg.min_members:
+            return None
+        ctx = self._ctx(profile)
+        hist = self._hist(history)                       # 假名化 TrialFacts
+        d: _EnsemblePick = self._messages_parse(
+            self._facts_block(profile)
+            + f"\n\n已完成 trials (trial_id 為假名):\n"
+              f"{json.dumps(hist, ensure_ascii=False, indent=2)}\n\n"
+              f"請判斷是否值得把多個模型組成 ensemble (機率軟投票) 以提升下游效能。\n"
+              f"- 選 {ensemble_cfg.min_members}–{ensemble_cfg.max_members} 個**夠強且多樣**"
+              f"的成員 (不同 encoder / 不同 domain 的預測較不相關, 集成增益更大; "
+              f"明顯落後的弱模型會拖累, 不要納入)。\n"
+              f"- method: equal(等權) / val_weighted(依 val 求權重) / stacking(val 上訓練"
+              f" meta-learner); 成員多且各有所長時 val_weighted 或 stacking 通常較好。\n"
+              f"- member_trial_ids 請填上面清單中的**假名 trial_id**; 只有 status=done 的可選。\n"
+              f"- 若成員不足 2 個, 或彼此高度相似 (集成沒意義), do_ensemble=false。"
+            + self._info_note(ctx),
+            _EnsemblePick, label="propose_ensemble", profile=profile)
+        if not d.do_ensemble:
+            return None
+        real_ids = redact.resolve_trial_ids(
+            d.member_trial_ids, done, ctx.alias)[: ensemble_cfg.max_members]
+        if len(real_ids) < ensemble_cfg.min_members:
+            return None
+        return EnsembleSpec(member_trial_ids=real_ids, method=d.method,
+                            rationale=d.rationale)
 
     # ---- 樹搜尋節點選擇的覆寫機會 (policy 選完 → 決策層過目) ----------
     def review_search_choice(self, profile: DatasetProfile, tree: list[dict],

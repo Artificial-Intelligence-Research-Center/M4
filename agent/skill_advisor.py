@@ -31,8 +31,8 @@ from .privacy import redact
 from .privacy.context import PrivacyContext
 from .privacy.facts import ErrorFacts
 from .schemas import (
-    DatasetProfile, EncoderChoice, InfoRequest, NextAction, Recipe,
-    SearchOverride, TrialResult,
+    DatasetProfile, EncoderChoice, EnsembleSpec, InfoRequest, NextAction,
+    Recipe, SearchOverride, TrialResult,
 )
 
 _DEFAULT_HANDOFF = os.path.join(
@@ -126,6 +126,35 @@ class SkillAdvisor:
             except Exception:
                 pass
         return InfoRequest()
+
+    def propose_ensemble(self, profile: DatasetProfile,
+                         history: list[TrialResult], ensemble_cfg):
+        """委派 skill 選 ensemble 成員; 無回應則退回 heuristic 規則式選擇。
+
+        skill 回傳的成員為假名 trial_id, 以反查表還原成真實 id (白名單)。
+        """
+        alias = self._ctx(profile).alias
+        done = [t for t in history if t.status == "done"
+                and t.recipe.encoder.model_key != "ensemble"]
+        req = self._write_request("propose_ensemble", {
+            **self._facts_payload(profile),
+            "history": [redact.trial_facts(t, alias).model_dump() for t in history],
+            "ensemble_cfg": {"min_members": ensemble_cfg.min_members,
+                             "max_members": ensemble_cfg.max_members,
+                             "method": ensemble_cfg.method},
+        }, profile)
+        resp = self._invoke_skill(req)
+        if resp and "ensemble" in resp:
+            try:
+                spec = EnsembleSpec.model_validate(resp["ensemble"])
+                real = redact.resolve_trial_ids(
+                    spec.member_trial_ids, done, alias)[: ensemble_cfg.max_members]
+                if len(real) >= ensemble_cfg.min_members:
+                    spec.member_trial_ids = real
+                    return spec
+            except Exception:
+                pass
+        return self.fallback.propose_ensemble(profile, history, ensemble_cfg)
 
     def select_encoders(self, profile: DatasetProfile) -> list[EncoderChoice]:
         from . import encoder_registry as reg

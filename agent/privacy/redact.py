@@ -292,6 +292,22 @@ def discussion_facts(entries: list[dict], alias: AliasMap,
     return out
 
 
+def resolve_trial_ids(picked_ids, real_trials, alias: AliasMap) -> list:
+    """把決策層回傳的『假名 trial_id』還原成真實 trial_id (白名單, 防幻覺)。
+
+    LLM/skill 只看得到假名 trial_id (見 trial_facts); 回傳的成員 id 需以「真實 trial_id
+    的假名版本」反查回真實 id。不在白名單 (假名或真實皆對不上) 的一律丟棄, 去重保序。
+    """
+    rev = {alias.substitute(t.trial_id): t.trial_id for t in real_trials}
+    valid = {t.trial_id for t in real_trials}
+    out: list = []
+    for mid in (picked_ids or []):
+        rid = rev.get(mid) or (mid if mid in valid else None)
+        if rid and rid not in out:
+            out.append(rid)
+    return out
+
+
 def user_segments(entries: list[dict], alias: AliasMap,
                   limit: int = 20) -> list[str]:
     """討論記錄中由『使用者親自輸入』的片段 — 出口掃描對這些命中只警示不中止。

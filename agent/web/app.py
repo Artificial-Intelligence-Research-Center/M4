@@ -519,6 +519,17 @@ def run_full():
     cfg.loop.max_resumes = st["max_resumes"]
     cfg.eval.primary_metric = f.get("primary_metric") or st["primary_metric"]
     cfg.eval.aggregation = f.get("aggregation", "single")
+    # 集成 (ensemble): 由整體設定套用 (docs/ensemble_design.md)
+    _b = lambda v: str(v).strip().lower() in ("true", "1", "on", "yes")
+    cfg.ensemble.enabled = _b(st["ensemble_enabled"])
+    cfg.ensemble.method = st["ensemble_method"]
+    cfg.ensemble.llm_select = _b(st["ensemble_llm_select"])
+    cfg.ensemble.min_members = int(st["ensemble_min_members"])
+    cfg.ensemble.max_members = int(st["ensemble_max_members"])
+    cfg.ensemble.member_delta = float(st["ensemble_member_delta"])
+    cfg.ensemble.in_search = _b(st["ensemble_in_search"])
+    cfg.ensemble.search_patience = int(st["ensemble_search_patience"])
+    cfg.ensemble.max_search_ensembles = int(st["ensemble_max_search_ensembles"])
     cfg.stream_logs = False  # web: 不 tee 到 console; log 檔仍寫, 供輪詢
 
     run_name = time.strftime("run_%Y%m%d_%H%M%S")
