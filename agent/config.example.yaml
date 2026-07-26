@@ -73,6 +73,13 @@ gpu:                                       # GPU 利用率最佳化 (訓練期�
   mem_target: 0.85                         # 加大 batch 後記憶體峰值上限 (佔總量比例)
   max_batch_size: 256                      # batch 上限
   max_num_workers: 16                      # dataloader worker 上限 (自動 clamp 到每 epoch iters)
+  grow_batch: true                         # 低利用率時是否加大 batch (逐 fold 平行共卡時自動關閉)
+  # 逐 fold 平行 (aggregation=per_fold) 的自適應共卡: 某卡 util 低且 mem 低時, 在該卡
+  # 加開第二個 fold 提高利用率 (取代加大 batch)。見 docs/per_fold_parallel_design.md。
+  max_folds_per_gpu: 2                      # 每顆 GPU 最多同時幾個 fold (1 = 不共用)
+  pack_low_util: true                      # 開/關『低利用率即共卡』
+  pack_util_below: 35.0                    # 即時 util 低於此 (%) 才考慮加開
+  pack_mem_below: 0.5                       # 且已用記憶體比例低於此 (0-1) 才加開
   cache_auto: true                         # 高解析度資料集自動啟用預縮圖快取 (run 起手決定)
   cache_short_side: 512                    # 快取短邊 (原圖中位短邊 ≥ 1.5×此值才啟用)
 

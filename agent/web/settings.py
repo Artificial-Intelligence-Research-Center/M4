@@ -53,10 +53,37 @@ FIELDS: list[tuple] = [
     ("ensemble_search_patience", "搜尋中集成 search_patience（觸發的無提升輪數）",
      "int", 2, None),
     ("ensemble_max_search_ensembles", "搜尋中集成次數上限", "int", 3, None),
+    # ---- 逐 fold 平行的 GPU 共用 (docs/per_fold_parallel_design.md) ----
+    ("gpu_pack_low_util", "GPU 低利用率時共卡（逐 fold 平行 · 取代加大 batch）",
+     "choice", "true", ["true", "false"]),
+    ("gpu_max_folds_per_gpu", "每顆 GPU 最多同時幾個 fold（1=不共用）", "int", 2, None),
+    ("gpu_pack_util_below", "共卡觸發：即時 util 低於 (%)", "float", 35.0, None),
+    ("gpu_pack_mem_below", "共卡觸發：已用記憶體比例低於 (0-1)", "float", 0.5, None),
 ]
 
 _DEFAULTS = {k: d for k, _l, _t, d, _c in FIELDS}
 _TYPES = {k: t for k, _l, t, _d, _c in FIELDS}
+_FIELD_BY_KEY = {k: (k, l, t, d, c) for k, l, t, d, c in FIELDS}
+
+# 設定頁的分類 (nav)；每類列出所屬欄位 key。順序即顯示順序。
+SECTIONS: list[tuple] = [
+    ("api", "API 與決策層", ["anthropic_api_key", "advisor_type", "model"]),
+    ("loop", "搜尋迴圈", ["num_drafts", "max_trials", "min_trials", "patience",
+                          "improve_temperature", "debug_prob", "max_debug_depth",
+                          "resume_epochs", "max_resumes"]),
+    ("eval", "評估與圍欄", ["primary_metric", "privacy_mode"]),
+    ("ensemble", "集成", ["ensemble_enabled", "ensemble_method", "ensemble_llm_select",
+                          "ensemble_min_members", "ensemble_max_members",
+                          "ensemble_member_delta", "ensemble_in_search",
+                          "ensemble_search_patience", "ensemble_max_search_ensembles"]),
+    ("gpu", "GPU 平行 / 共卡", ["gpu_pack_low_util", "gpu_max_folds_per_gpu",
+                               "gpu_pack_util_below", "gpu_pack_mem_below"]),
+]
+
+
+def field(key: str):
+    """回傳某欄位的定義 (key, label, type, default, choices)；未知回 None。"""
+    return _FIELD_BY_KEY.get(key)
 
 
 def _coerce(key: str, val):

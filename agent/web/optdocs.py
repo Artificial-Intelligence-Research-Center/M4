@@ -16,10 +16,9 @@ try:
 except Exception:                       # pragma: no cover - markdown 應已安裝
     _md = None
 
-_DOC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs",
-                    "run_options.md")
+_DOCS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs")
 _MARK = re.compile(r"^<!--\s*key:\s*([\w.\-]+)\s*-->\s*$", re.M)
-_cache: dict = {"mtime": None, "docs": {}}
+_cache: dict = {}                       # {path: (mtime, {key: html})}
 
 
 def _render(md_text: str) -> str:
@@ -29,16 +28,17 @@ def _render(md_text: str) -> str:
     return "<pre>" + html.escape(md_text) + "</pre>"
 
 
-def load() -> dict:
-    """回傳 {section_key: html}；檔案缺失回空 dict。依 mtime 快取，改檔即時生效。"""
+def _load(path: str) -> dict:
+    """讀某個 `<!-- key: X -->` 分節的 markdown → {key: html}；依 mtime 快取。"""
     try:
-        mt = os.path.getmtime(_DOC)
+        mt = os.path.getmtime(path)
     except OSError:
         return {}
-    if _cache["mtime"] == mt:
-        return _cache["docs"]
+    ent = _cache.get(path)
+    if ent and ent[0] == mt:
+        return ent[1]
     try:
-        with open(_DOC, encoding="utf8") as f:
+        with open(path, encoding="utf8") as f:
             raw = f.read()
     except OSError:
         return {}
@@ -48,6 +48,15 @@ def load() -> dict:
     it = iter(parts[1:])
     for key, body in zip(it, it):
         docs[key.strip()] = _render(body)
-    _cache["mtime"] = mt
-    _cache["docs"] = docs
+    _cache[path] = (mt, docs)
     return docs
+
+
+def load() -> dict:
+    """工作台「新完整流程」表單各選項的說明 (docs/run_options.md)。"""
+    return _load(os.path.join(_DOCS_DIR, "run_options.md"))
+
+
+def load_settings() -> dict:
+    """整體設定頁各欄位的說明 (docs/settings_help.md)。"""
+    return _load(os.path.join(_DOCS_DIR, "settings_help.md"))

@@ -74,11 +74,16 @@
       <div id="chat-prog-bar" class="bar" style="height:4px;display:none"><span style="width:0"></span></div>
       <label>目前 run</label>
       <div style="display:flex;gap:6px;align-items:center">
-        <select id="rs-run" onchange="pollRunStatus()" style="flex:1">
+        <select id="rs-run" onchange="onRunChange()" style="flex:1">
           {% for n in run_names %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
         </select>
         <button type="button" onclick="deleteRun()" title="刪除此 run"
           style="margin:0;background:#f4f5f7;color:#c0392b;padding:8px 10px;flex:0 0 auto">🗑</button>
+      </div>
+      <!-- 逐 fold 平行: 切換到某個 fold 的獨立子執行 (各自對話與結果) -->
+      <div id="fold-row" style="display:none;margin-top:6px">
+        <label style="font-size:12px">fold（逐 fold 平行 · 各自獨立）</label>
+        <select id="rs-fold" onchange="pollRunStatus()" style="width:100%"></select>
       </div>
       {% if not run_names %}<div class="muted" style="margin-top:8px">尚無 run，先在右方開一個完整流程。</div>{% endif %}
       <div id="privacy-bar" style="display:none;margin-top:8px;font-size:11px;padding:5px 8px;
@@ -480,8 +485,6 @@ function trialCard(t, cmap){
 // ---- 解答樹節點 → 跳出式結果對話框 --------------------------------------
 let _lastRun=null;
 // per_fold: 目前選擇顯示哪個 fold ('all' = 全部疊著顯示; 否則為 fold index 字串)
-let _foldFilter='all';
-function setFold(v){ _foldFilter=String(v); pollRunStatus(); }
 function openTrialModal(tid){
   const m=document.getElementById('trial-modal');
   const title=document.getElementById('trial-modal-title');
@@ -521,6 +524,36 @@ document.addEventListener('keydown', e=>{
 })();
 // 載入指示: 首次載入 / 切換 run 時顯示 spinner 與頂部進度條 (之後的輪詢靜默更新)
 let _loadedRun=null;
+// 逐 fold 平行: 有效 run = 父 run，或選定某 fold 的子執行 (parent/foldN)
+function effRun(){
+  const r=document.getElementById('rs-run'); if(!r||!r.value) return '';
+  const fr=document.getElementById('fold-row'), f=document.getElementById('rs-fold');
+  if(fr && fr.style.display!=='none' && f && f.value!=='') return r.value+'/fold'+f.value;
+  return r.value;
+}
+function onRunChange(){
+  const f=document.getElementById('rs-fold'); if(f) f.value='';       // 換 run → 回父覽覽
+  const fr=document.getElementById('fold-row'); if(fr) fr.style.display='none';
+  pollRunStatus();
+}
+function switchFold(v){
+  const f=document.getElementById('rs-fold'); if(f) f.value=String(v);
+  pollRunStatus();
+}
+// 依父 run 的 parallel_folds 更新 fold 選擇器 (只在檢視父 run 時呼叫)
+function updateFoldSelector(pf){
+  const fr=document.getElementById('fold-row'), f=document.getElementById('rs-fold');
+  if(!fr||!f) return;
+  if(!pf || !(pf.folds||[]).length){ fr.style.display='none'; f.innerHTML=''; return; }
+  const cur=f.value;
+  let opts='<option value="">總覽（全部 fold）</option>';
+  pf.folds.forEach(e=>{
+    const st=e.status||'', gpu=(e.device!=null?('GPU'+e.device):'—');
+    const pm=(e.primary!=null?(' · '+fmt(e.primary)):'');
+    opts+=`<option value="${e.index}">Fold ${e.index+1}：${esc(e.name)} · ${gpu} · ${esc(st)}${pm}</option>`;
+  });
+  f.innerHTML=opts; f.value=cur; fr.style.display='';
+}
 function _loadbar(on){ const b=document.getElementById('loadbar'); if(b) b.classList.toggle('on', !!on); }
 function _showLoading(nb){
   _loadbar(true);
@@ -553,14 +586,45 @@ function renderChatProgress(j, cur){
     if(on) bar.firstElementChild.style.width=(cur.percent||0)+'%';
   }
 }
+// 逐 fold 平行: 父 run 總覽 — 各 fold 的 GPU/狀態/最佳分數 + 點入按鈕
+function renderParentOverview(j){
+  const nb=document.getElementById('nb'); if(!nb) return;
+  const pf=j.parallel_folds, folds=pf.folds||[];
+  const pill=st=>{const m={finished:'done',running:'running',queued:'pending',failed:'error'}[st]||'pending';
+    return `<span class="pill ${m}">${esc(st||'')}</span>`;};
+  let rows=folds.map(e=>`<tr>`
+    +`<td>Fold ${e.index+1}</td><td>${esc(e.name)}</td>`
+    +`<td>${e.device!=null?('GPU '+e.device):'—'}</td><td>${pill(e.status)}</td>`
+    +`<td>${e.primary!=null?fmt(e.primary):'—'}</td>`
+    +`<td><button type="button" onclick="switchFold(${e.index})" style="width:auto;margin:0;padding:3px 10px">查看</button></td>`
+    +`</tr>`).join('');
+  const body=`<div class="muted" style="margin-bottom:6px">逐 fold 平行搜尋：`
+    +`${folds.length} 個 fold 分配到 GPU ${(pf.devices||[]).join(', ')||'—'} 上獨立執行。`
+    +`每個 fold 有自己的對話與結果，點「查看」或用左上「fold」選擇器切換。</div>`
+    +`<table class="kv"><tr><th>fold</th><th>資料</th><th>GPU</th><th>狀態</th>`
+    +`<th>最佳 primary</th><th></th></tr>${rows}</table>`;
+  let html=cell('🧩 逐 fold 平行總覽'+(pf.done?'（已全部完成）':'（執行中）'),
+    folds.filter(e=>e.status==='finished').length+' / '+folds.length+' 完成', body, 'parent-overview');
+  if(j.config) html+=cell('本次 run 設定 (config.yaml)','', '<pre style="max-height:240px">'+esc(j.config)+'</pre>', 'config');
+  if(j.report) html+=cell('彙整 report.md','', '<pre style="max-height:340px">'+esc(j.report)+'</pre>', 'report');
+  reconcile(nb, html); applyCellUI(nb);
+}
 async function pollRunStatus(){
   const sel=document.getElementById('rs-run'), nb=document.getElementById('nb');
   if(!sel || !sel.value){ renderChatProgress(null); return; }
-  if(_loadedRun!==sel.value) _showLoading(nb);
+  const eff=effRun(), onParent=(eff===sel.value);
+  if(_loadedRun!==eff) _showLoading(nb);
   let j;
-  try { j = await (await fetch('run_status/?run='+encodeURIComponent(sel.value))).json(); }
+  try { j = await (await fetch('run_status/?run='+encodeURIComponent(eff))).json(); }
   catch(e){ _loadbar(false); nb.innerHTML='<div class="banner warn">連線失敗</div>'; return; }
   if(!j.ok){ _loadbar(false); nb.innerHTML='<div class="banner warn">'+(j.error||'錯誤')+'</div>'; return; }
+  // 逐 fold 平行: 檢視父 run 時更新 fold 選擇器 + 顯示各 fold 進程總覽
+  if(onParent) updateFoldSelector(j.parallel_folds);
+  if(onParent && j.parallel_folds){
+    renderParentOverview(j); _loadedRun=eff; _loadbar(false);
+    renderChat(j.conversation||[], j.stopped, j.qa_stream, j.user_facts);
+    return;
+  }
   const cmap={}, done=j.trials||[], cur=j.current, rt=j.running_trial;
   _lastRun={done, rt, cmap};   // 供解答樹節點點擊 → 跳出式結果對話框查資料
   let html='';
@@ -568,51 +632,17 @@ async function pollRunStatus(){
   renderChatProgress(j, cur);
   // 設定 cell
   if(j.config) html+=cell('本次 run 設定 (config.yaml)','', '<pre style="max-height:240px">'+esc(j.config)+'</pre>', 'config');
-  // per_fold: fold 選擇器 (指定只看某個 fold; 「全部」= 疊著顯示)
-  const foldOf=t=>{ const p=(t.recipe&&t.recipe.provenance)||{}; return p.fold; };
-  if(j.folds && j.folds.length){
-    const fbtn=(v,label,active)=>`<button type="button" onclick="setFold('${v}')" `
-      +`style="width:auto;margin:0 6px 0 0;padding:3px 11px;border-radius:999px;font-size:12px;cursor:pointer;`
-      +`border:1px solid ${active?'#9dbcf5':'#e3e6ea'};background:${active?'#eaf1fd':'#fff'};`
-      +`color:${active?'#1a4fa0':'#374151'};font-weight:${active?600:400}">${esc(label)}</button>`;
-    let sel=fbtn('all','全部', _foldFilter==='all');
-    j.folds.forEach(f=>{ sel+=fbtn(f.index, 'Fold '+(f.index+1)
-      +(f.primary!=null?(' · '+fmt(f.primary)):''), String(f.index)===_foldFilter); });
-    html+=cell('🗂 選擇 fold 顯示','', '<div style="display:flex;flex-wrap:wrap;align-items:center">'+sel+'</div>', 'foldsel');
-  }
-  // 進行中 trial cell (per_fold 且指定單一 fold 時, 只在該 fold 進行中才顯示)
-  const runFold = rt && rt.recipe ? (rt.recipe.provenance||{}).fold : undefined;
-  const showRun = rt && rt.recipe && rt.recipe.encoder
-    && (!j.folds || _foldFilter==='all' || String(runFold)===_foldFilter);
-  if(showRun) html+=cell('⏳ 進行中 trial（即時參數 + 曲線）', esc(rt.trial_id), trialCard(rt, cmap), 'running');
-  // histogram / 解答樹 / trial cells —— per_fold 模式分 fold 顯示
+  // 進行中 trial cell
+  if(rt && rt.recipe && rt.recipe.encoder) html+=cell('⏳ 進行中 trial（即時參數 + 曲線）', esc(rt.trial_id), trialCard(rt, cmap), 'running');
+  // histogram / 解答樹 / trial cells。逐 fold 平行的『分 fold 顯示』改由左上「fold」
+  // 選擇器切換到各 fold 的獨立子執行 (各自對話與結果)，故這裡一律單一檢視。
   const histBars=ts=>ts.filter(t=>t.status==='done').map(t=>({
     label:t.trial_id.length>34?'…'+t.trial_id.slice(-32):t.trial_id,
     value:t.primary_score||0, color:encColor(cmap, t.recipe.encoder.model_key)}));
-  const trialCells=ts=>ts.slice().reverse().forEach(t=>{
-    html+=cell('　trial：'+t.trial_id, `<span class="pill ${t.status}">${t.status}</span>`,
-      trialCard(t, cmap), 'trial:'+t.trial_id); });
-  if(j.folds && j.folds.length){
-    j.folds.forEach(f=>{
-      if(_foldFilter!=='all' && String(f.index)!==_foldFilter) return;   // 只顯示選定 fold
-      const ft=done.filter(t=>foldOf(t)===f.index);
-      const nd=ft.filter(t=>t.status==='done').length;
-      const meta=(f.primary!=null?('最佳 primary '+fmt(f.primary)+' · '):'')+nd+' 完成';
-      html+=cell('🗂 Fold '+(f.index+1)+'：'+esc(f.name), meta, '', 'foldhdr:'+f.index);
-      const tr=f.tree;
-      if(tr && ((tr.nodes&&tr.nodes.length)||(!tr.nodes&&Object.keys(tr).length)))
-        html+=cell('　🌳 解答樹（fold '+(f.index+1)+'）','', svgTreeAll(tr, cmap), 'tree:fold'+f.index);
-      html+=cell('　📊 histogram（fold '+(f.index+1)+'）','', svgBars(histBars(ft)), 'hist:fold'+f.index);
-      trialCells(ft);
-    });
-    if(_foldFilter==='all')
-      trialCells(done.filter(t=>foldOf(t)===undefined));   // 未標記 fold 的 trial (理論上無)
-  } else {
-    html+=cell('結果 histogram（各 trial primary＝test 成績 · 顏色=encoder）','', svgBars(histBars(done)), 'histogram');
-    if(j.search_tree && Object.keys(j.search_tree).length)
-      html+=cell('🌳 解答樹（AIDE 式搜尋：先開滿 draft → 每輪依指標機率選節點 improve/debug/resume）','', svgTreeAll(j.search_tree, cmap), 'tree');
-    done.slice().reverse().forEach(t=>{ html+=cell('trial：'+t.trial_id, `<span class="pill ${t.status}">${t.status}</span>`, trialCard(t, cmap), 'trial:'+t.trial_id); });
-  }
+  html+=cell('結果 histogram（各 trial primary＝test 成績 · 顏色=encoder）','', svgBars(histBars(done)), 'histogram');
+  if(j.search_tree && Object.keys(j.search_tree).length)
+    html+=cell('🌳 解答樹（AIDE 式搜尋：先開滿 draft → 每輪依指標機率選節點 improve/debug/resume）','', svgTreeAll(j.search_tree, cmap), 'tree');
+  done.slice().reverse().forEach(t=>{ html+=cell('trial：'+t.trial_id, `<span class="pill ${t.status}">${t.status}</span>`, trialCard(t, cmap), 'trial:'+t.trial_id); });
   // report cell
   if(j.report) html+=cell('report.md','', '<pre style="max-height:300px">'+esc(j.report)+'</pre>', 'report');
   // LLM 完整提示詞與回應: 每次呼叫獨立成格 (key=ts) → 已展開的呼叫不會因輪詢/新呼叫而重載
@@ -638,7 +668,7 @@ async function pollRunStatus(){
   applyCellUI(nb);       // 重繪後重套用各格的縮放層級 / 全螢幕狀態
   renderChat(j.conversation||[], j.stopped, j.qa_stream, j.user_facts);
   renderPrivacy(j.privacy);
-  _loadedRun=sel.value; _loadbar(false);
+  _loadedRun=eff; _loadbar(false);
   // QA streaming 中: 加速輪詢 (0.7s) 讓文字流暢滾出; 結束後回到 4s 節奏
   clearTimeout(window._qaFastT);
   if(j.qa_stream) window._qaFastT=setTimeout(pollRunStatus, 700);
@@ -745,7 +775,7 @@ function questionCard(e){
     + `</div>`;
 }
 async function submitAnswers(cid){
-  const box=document.getElementById(cid), run=document.getElementById('rs-run');
+  const box=document.getElementById(cid), run={value:effRun()};
   if(!box||!run||!run.value) return;
   const out=[];
   box.querySelectorAll('[data-k]').forEach(el=>{
@@ -802,7 +832,7 @@ function renderChat(entries, stopped, qa, userFacts){
   if(atBottom || qa) box.scrollTop = box.scrollHeight;
 }
 async function sendDiscuss(){
-  const run=document.getElementById('rs-run'), inp=document.getElementById('chat-input');
+  const run={value:effRun()}, inp=document.getElementById('chat-input');
   if(!run||!run.value){ alert('請先選一個 run'); return; }
   if(!inp.value.trim()) return;
   const fd=new FormData(); fd.append('run', run.value); fd.append('text', inp.value.trim());
@@ -811,7 +841,7 @@ async function sendDiscuss(){
   setTimeout(pollRunStatus, 600);   // QA 串流檔剛建立時儘快接上打字氣泡
 }
 async function stopRun(){
-  const run=document.getElementById('rs-run');
+  const run={value:effRun()};
   if(!run||!run.value){ alert('請先選一個 run'); return; }
   if(!confirm('確定中斷這個實驗？正在跑的 trial 會先完成再停止。')) return;
   const fd=new FormData(); fd.append('run', run.value);
@@ -819,7 +849,7 @@ async function stopRun(){
   pollRunStatus();
 }
 async function resumeRun(){
-  const run=document.getElementById('rs-run');
+  const run={value:effRun()};
   if(!run||!run.value){ alert('請先選一個 run'); return; }
   if(!confirm('從上次停止的地方繼續實驗「'+run.value+'」？\n（載入既有 trial 與解答樹後接續下一輪；若已達 max_trials 會立即依停止條件結束）')) return;
   const fd=new FormData(); fd.append('run', run.value);

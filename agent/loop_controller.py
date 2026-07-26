@@ -638,8 +638,10 @@ class LoopController:
         changes = {}
 
         # 1) 記憶體有餘裕 → 加大 batch (利用率極低且記憶體夠時 ×4)
+        #    grow_batch=False 時跳過 (逐 fold 平行共卡模式改以多 fold 共用提高利用率,
+        #    不加大 batch 以免拖慢收斂 / 與同卡的另一個 fold 搶記憶體)。
         factor = 4 if util < g.util_target / 2 else 2
-        while factor > 1:
+        while getattr(g, "grow_batch", True) and factor > 1:
             if (peak and total and peak * factor <= total * g.mem_target
                     and hp.batch_size * factor <= g.max_batch_size):
                 break

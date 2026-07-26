@@ -382,10 +382,24 @@ _HP_FIELDS = [
 
 @app.route("/settings")
 def settings_page():
-    """整體設定頁: API KEY / model / improve_temperature 等新實驗的預設值。"""
+    """整體設定頁: 左 nav 分類 ｜ 中 item ｜ 右 description (與實驗設定同格式)。"""
+    values = app_settings.load()
+    helps = app_optdocs.load_settings()
+    groups = []
+    for cid, label, keys in app_settings.SECTIONS:
+        items = []
+        for k in keys:
+            fd = app_settings.field(k)
+            if not fd:
+                continue
+            _k, flabel, ftype, _default, choices = fd
+            items.append({"key": k, "label": flabel, "type": ftype,
+                          "choices": choices, "value": values.get(k),
+                          "help": helps.get(k, "")})
+        groups.append({"id": cid, "label": label, "rows": items})
     return render_template(
         "settings.html", nav="settings", route_seg="settings",
-        fields=app_settings.FIELDS, values=app_settings.load(),
+        groups=groups, values=values,
     )
 
 
@@ -534,6 +548,11 @@ def run_full():
     cfg.ensemble.in_search = _b(st["ensemble_in_search"])
     cfg.ensemble.search_patience = int(st["ensemble_search_patience"])
     cfg.ensemble.max_search_ensembles = int(st["ensemble_max_search_ensembles"])
+    # 逐 fold 平行的 GPU 共用 (docs/per_fold_parallel_design.md)
+    cfg.gpu.pack_low_util = _b(st["gpu_pack_low_util"])
+    cfg.gpu.max_folds_per_gpu = int(st["gpu_max_folds_per_gpu"])
+    cfg.gpu.pack_util_below = float(st["gpu_pack_util_below"])
+    cfg.gpu.pack_mem_below = float(st["gpu_pack_mem_below"])
     cfg.stream_logs = False  # web: 不 tee 到 console; log 檔仍寫, 供輪詢
 
     run_name = time.strftime("run_%Y%m%d_%H%M%S")
@@ -560,7 +579,11 @@ def run_full():
         with _LOCK:
             JOBS[job_id]["status"] = "running"
         try:
-            out = auto_finetune.run(cfg, run_dir=run_dir)
+            if cfg.eval.aggregation == "per_fold":
+                from ..fold_fleet import run_fleet     # 逐 fold 平行 (各自子執行/GPU)
+                out = run_fleet(cfg, run_dir=run_dir)
+            else:
+                out = auto_finetune.run(cfg, run_dir=run_dir)
             with _LOCK:
                 JOBS[job_id].update(
                     status="finished", n_trials=out["n_trials"],
@@ -651,7 +674,11 @@ def run_status():
     run = request.args.get("run") or (_run_names()[0] if _run_names() else None)
     if not run:
         return jsonify({"ok": False, "error": "尚無任何 run"}), 404
-    run_dir = os.path.join(_RUNS, run)
+    # 允許巢狀路徑 run=<parent>/foldN (逐 fold 平行的子執行); 但限制在 _RUNS 內
+    run_dir = os.path.realpath(os.path.join(_RUNS, run))
+    if not (run_dir == os.path.realpath(_RUNS)
+            or run_dir.startswith(os.path.realpath(_RUNS) + os.sep)):
+        return jsonify({"ok": False, "error": "無效的 run 路徑"}), 400
     if not os.path.isdir(run_dir):
         return jsonify({"ok": False, "error": f"找不到 run: {run}"}), 404
 
@@ -727,27 +754,34 @@ def run_status():
         except Exception:
             pass
 
-    # per_fold 模式: 分 fold 索引 (folds.json) + 各 fold 的解答樹
+    # per_fold: folds.json —— 兩種模式
+    #   per_fold_parallel: 各 fold 是獨立子執行 (parent/foldN) → 回 parallel_folds 供 UI 切換
+    #   per_fold (舊·單 run 循序): 各 fold 的解答樹附在同一 run → 回 folds (含 tree)
     folds = None
+    parallel_folds = None
     fjp = os.path.join(run_dir, "folds.json")
     if os.path.isfile(fjp):
         try:
             with open(fjp, encoding="utf8") as fh:
                 fj = json.load(fh)
-            folds = fj.get("folds") or []
-            cur = fj.get("current", -1)
-            for ent in folds:
-                # 進行中的 fold 用即時 search_tree.json; 已完成的用各自的快照檔
-                tfile = ("search_tree.json" if ent.get("index") == cur
-                         else ent.get("tree"))
-                ent["tree"] = None
-                tp = os.path.join(run_dir, tfile) if tfile else None
-                if tp and os.path.isfile(tp):
-                    try:
-                        with open(tp, encoding="utf8") as th:
-                            ent["tree"] = json.load(th)
-                    except Exception:
-                        ent["tree"] = None
+            if fj.get("mode") == "per_fold_parallel":
+                parallel_folds = {"folds": fj.get("folds") or [],
+                                  "devices": fj.get("devices") or [],
+                                  "done": bool(fj.get("done"))}
+            else:
+                folds = fj.get("folds") or []
+                cur = fj.get("current", -1)
+                for ent in folds:
+                    tfile = ("search_tree.json" if ent.get("index") == cur
+                             else ent.get("tree"))
+                    ent["tree"] = None
+                    tp = os.path.join(run_dir, tfile) if tfile else None
+                    if tp and os.path.isfile(tp):
+                        try:
+                            with open(tp, encoding="utf8") as th:
+                                ent["tree"] = json.load(th)
+                        except Exception:
+                            ent["tree"] = None
         except Exception:
             folds = None
 
@@ -796,6 +830,7 @@ def run_status():
                     "stopped": convo.stop_requested(run_dir)[0],
                     "qa_stream": qa_stream, "user_facts": user_facts,
                     "privacy": privacy, "folds": folds,
+                    "parallel_folds": parallel_folds,
                     "llm_calls": llm_calls, "search_tree": search_tree})
 
 

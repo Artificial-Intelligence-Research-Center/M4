@@ -88,6 +88,14 @@ class GpuOptConfig(BaseModel):
     mem_target: float = 0.85       # 加大 batch 後預估記憶體峰值不可超過總量的此比例
     max_batch_size: int = 256      # batch 上限
     max_num_workers: int = 16      # dataloader worker 上限
+    grow_batch: bool = True        # 低利用率時是否加大 batch (逐 fold 平行且開啟共卡時會關掉,
+                                   # 改以多個 fold 共用一卡提高利用率, 避免加大 batch 拖慢收斂)
+    # 逐 fold 平行 (fold_fleet) 的 GPU 共用: 偵測某卡 util 低且 mem 低時, 於該卡加開
+    # 第二個 fold 提高利用率 (取代加大 batch)。見 docs/per_fold_parallel_design.md。
+    max_folds_per_gpu: int = 2     # 每顆 GPU 最多同時幾個 fold (1 = 不共用)
+    pack_low_util: bool = True     # 開/關『低利用率即共卡』的自適應策略
+    pack_util_below: float = 35.0  # 卡的即時 util 低於此 (%) 才考慮加開
+    pack_mem_below: float = 0.5    # 且已用記憶體比例低於此 (0-1) 才加開 (確保塞得下)
     # 預縮圖磁碟快取 (高解析度資料集的 decode 瓶頸): run 起手依 image_size_stats 決定
     cache_auto: bool = True        # 原圖中位短邊 ≥ 1.5×cache_short_side 時自動啟用
     cache_short_side: int = 512    # 快取短邊 (~2×input_size, 留 RandomResizedCrop 餘裕)
