@@ -36,7 +36,10 @@
           <label>超參起點 (preset)</label>
           <select name="preset">{% for p in presets %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select>
         </div>
-        <div><label>主要指標 (primary_metric)</label><input type="text" name="primary_metric" value="score"></div>
+        <div><label>主要指標 (primary_metric)</label>
+          <select name="primary_metric">
+            {% for m in primary_metrics %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+          </select></div>
       </div>
       <button type="button" class="ghost" onclick="analyze()">分析 (dry-run)</button>
       <button type="submit" class="primary" formaction="run/" formmethod="post">開始訓練</button>

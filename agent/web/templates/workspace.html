@@ -66,7 +66,10 @@
             <select name="advisor">{% for a in advisors %}<option value="{{ a }}" {{ 'selected' if a == settings.advisor_type }}>{{ a }}</option>{% endfor %}</select></div>
           <div><label>超參起點</label>
             <select name="preset">{% for p in presets %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select></div>
-          <div><label>主要指標</label><input type="text" name="primary_metric" value="{{ settings.primary_metric }}"></div>
+          <div><label>主要指標</label>
+            <select name="primary_metric">
+              {% for m in primary_metrics %}<option value="{{ m }}" {{ 'selected' if settings.primary_metric == m }}>{{ m }}</option>{% endfor %}
+            </select></div>
           <div><label>多 fold 彙整</label>
             <select name="aggregation"><option value="single">single</option><option value="mean_std">mean_std</option></select></div>
         </div>

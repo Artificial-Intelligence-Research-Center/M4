@@ -246,6 +246,7 @@ def index():
         run_names=_run_names(),
         modalities=_MODALITIES, anatomies=_ANATOMIES,
         settings=app_settings.load(),   # 表單預設值取自整體設定
+        primary_metrics=app_settings.PRIMARY_METRICS,
         **_dataset_ctx(),
     )
 
@@ -260,6 +261,7 @@ def experiments():
         available_keys=[c.model_key for c in reg.available_cards()],
         presets=presets_mod.names(),
         run_names=_run_names(),
+        primary_metrics=app_settings.PRIMARY_METRICS,
         **_dataset_ctx(),
     )
 

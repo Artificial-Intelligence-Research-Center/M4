@@ -15,6 +15,11 @@ import os
 _DIR = os.path.expanduser(os.path.join("~", ".medclaw"))
 _PATH = os.path.join(_DIR, "settings.json")
 
+# 主要指標可選值 (單一來源, 供設定頁與各表單下拉共用)。score=(f1+roc_auc+kappa)/3;
+# 其餘為 Evaluator/metric_registry 支援的分類指標 (見 agent/evaluator.py)。
+PRIMARY_METRICS = ["score", "accuracy", "f1", "roc_auc", "kappa",
+                   "balanced_accuracy", "precision", "recall", "average_precision"]
+
 # (key, label, type, default, choices)  type ∈ {secret, str, int, float, choice}
 FIELDS: list[tuple] = [
     ("anthropic_api_key", "ANTHROPIC_API_KEY", "secret", "", None),
@@ -31,7 +36,7 @@ FIELDS: list[tuple] = [
     ("resume_epochs", "resume_epochs（每次續訓多跑的 epoch）", "int", 20, None),
     ("max_resumes", "max_resumes（同分支續訓上限）", "int", 2, None),
     ("privacy_mode", "資料圍欄 (privacy)", "choice", "strict", ["strict", "standard", "off"]),
-    ("primary_metric", "主要指標 (primary_metric)", "str", "score", None),
+    ("primary_metric", "主要指標 (primary_metric)", "choice", "score", PRIMARY_METRICS),
     # ---- 集成 (ensemble; docs/ensemble_design.md) ----
     ("ensemble_enabled", "集成 enabled（收尾把多模型組 ensemble）",
      "choice", "true", ["true", "false"]),
