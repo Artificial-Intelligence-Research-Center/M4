@@ -1,6 +1,6 @@
 # MedClaw 模型集成 (Ensemble) — 設計文件
 
-- 狀態：v0.1 — **設計草案（尚未實作）**
+- 狀態：v0.2 — **方案 A 最小可用版已實作**（等權 / val 加權 + heuristic 選成員 + 收尾集成 + 報告）；LLM 選成員、stacking、方案 B 樹整合待做
 - 適用範圍：`agent/` 自動微調 Agent（MedClaw）的多模型集成
 - 相關文件：[auto_finetune_agent_design.md](auto_finetune_agent_design.md)、[data_firewall_design.md](data_firewall_design.md)、[model_registry_design.md](model_registry_design.md)
 - 相關程式：`agent/evaluator.py`、`agent/metric_registry.py`、`agent/loop_controller.py`、`agent/journal.py`、`agent/llm_advisor.py`、`agent/schemas.py`、`engine_finetune.py`

@@ -76,5 +76,15 @@ gpu:                                       # GPU 利用率最佳化 (訓練期�
   cache_auto: true                         # 高解析度資料集自動啟用預縮圖快取 (run 起手決定)
   cache_short_side: 512                    # 快取短邊 (原圖中位短邊 ≥ 1.5×此值才啟用)
 
+ensemble:                                  # 收尾集成 (docs/ensemble_design.md 方案 A)
+  # 樹搜尋停止後, 把多個已訓練 trial 以機率軟投票組成 ensemble; 重用各 trial 已落地的
+  # predictions_*.csv, 不重訓、不需 GPU。勝過最佳單模型才採用為交付。
+  enabled: true
+  method: val_weighted                     # equal (等權) | val_weighted (依 val 求權重)
+  min_members: 2                           # 至少幾個成員才組
+  max_members: 4                           # 最多納入幾個 (過多攤薄強成員)
+  member_delta: 0.05                       # 成員門檻: primary ≥ 最佳單模型 − 此值
+  require_diverse_encoders: true           # 優先涵蓋不同 encoder (去相關)
+
 device: 0
 dry_run: false

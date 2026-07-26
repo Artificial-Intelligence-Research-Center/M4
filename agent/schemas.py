@@ -132,6 +132,31 @@ class TrialResult(BaseModel):
     gpu_stats: dict = Field(default_factory=dict)
 
 
+class EnsembleSpec(BaseModel):
+    """一次集成的『策略』— 由決策層產生 (metadata, 可進 LLM prompt)。
+
+    ⚠ 資料圍欄: 決策層只選 trial_id 與方法, 不碰 predictions。實際的機率平均
+    在資料平面 (agent/ensembler.py) 執行, 只有彙整指標回流。見 docs/ensemble_design.md。
+    """
+    member_trial_ids: list[str] = Field(default_factory=list)  # 選中的成員 (≥2)
+    method: Literal["equal", "val_weighted", "stacking"] = "equal"
+    weights: Optional[list[float]] = None    # method=val_weighted 時由本地在 val 上求得
+    rationale: str = ""
+
+
+class EnsembleResult(BaseModel):
+    """集成結果 — 與 TrialResult 同構 (有 metrics/primary_score), 可同口徑比較。"""
+    ensemble_id: str
+    spec: EnsembleSpec
+    metrics: dict[str, float] = Field(default_factory=dict)
+    primary_score: float = 0.0
+    member_ckpts: list[str] = Field(default_factory=list)  # 各成員 checkpoint-best.pth
+    pred_path: Optional[str] = None          # 落地的集成 predictions_test.csv
+    n_samples: int = 0                        # 對齊後參與集成的樣本數
+    status: Literal["done", "failed"] = "done"
+    message: str = ""
+
+
 class SearchOverride(BaseModel):
     """決策層對「樹搜尋 policy 已選出的節點」的覆寫 (§5.7)。
 

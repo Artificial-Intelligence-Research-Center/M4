@@ -93,6 +93,20 @@ class GpuOptConfig(BaseModel):
     cache_short_side: int = 512    # 快取短邊 (~2×input_size, 留 RandomResizedCrop 餘裕)
 
 
+class EnsembleConfig(BaseModel):
+    """收尾集成 (docs/ensemble_design.md 方案 A)。
+
+    樹搜尋停止後, 把多個已訓練 trial 以『機率層級軟投票』組成 ensemble。
+    重用各 trial 已落地的 predictions_*.csv, 不重訓、不需 GPU。勝過最佳單模型
+    才採用為交付。權重最佳化一律在 val 上進行 (test 只報告), 杜絕洩漏。"""
+    enabled: bool = True
+    method: Literal["equal", "val_weighted"] = "val_weighted"  # 等權 / 依 val 加權
+    min_members: int = 2           # 至少幾個成員才組 ensemble
+    max_members: int = 4           # 最多納入幾個成員 (過多會攤薄強成員)
+    member_delta: float = 0.05     # 成員門檻: primary ≥ 最佳單模型 − 此值
+    require_diverse_encoders: bool = True  # 優先涵蓋不同 encoder (去相關)
+
+
 class PrivacyConfig(BaseModel):
     """資料圍欄 (docs/data_firewall_design.md §9)。
 
@@ -123,6 +137,7 @@ class AgentConfig(BaseModel):
     advisor: AdvisorConfig = Field(default_factory=AdvisorConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     gpu: GpuOptConfig = Field(default_factory=GpuOptConfig)
+    ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     device: int = 0
     dry_run: bool = False

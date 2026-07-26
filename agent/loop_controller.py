@@ -23,7 +23,7 @@ import time
 from typing import Optional
 
 from . import (analyzers, conversation, dataset_analyzer,
-               encoder_registry as reg, evaluator as ev, log_curves,
+               encoder_registry as reg, ensembler, evaluator as ev, log_curves,
                metric_registry as mreg, presets, report as report_mod)
 from .analyzers import error_extract
 from .config import AgentConfig
@@ -81,6 +81,7 @@ class LoopController:
         self._t0 = 0.0
         self.n_trials = 0
         self.best: Optional[TrialResult] = None
+        self.ensemble = None    # 收尾集成結果 (EnsembleResult), 見 _maybe_ensemble
         self._stopped = False   # 使用者/LLM 中斷
         self.journal: Optional[Journal] = None  # 全域解答樹 (落地 search_tree.json)
         self._last_gpu_stats: dict = {}  # 最近一個 trial 的 GPU 取樣 (draft 的 boost 依據)
@@ -894,6 +895,68 @@ class LoopController:
                 break
         return history
 
+    # ---- 收尾集成 (docs/ensemble_design.md 方案 A) ----------------------
+    def _maybe_ensemble(self, profile: DatasetProfile,
+                        history: list[TrialResult]):
+        """樹搜尋停止後, 嘗試把多個已訓練 trial 組成機率軟投票 ensemble。
+
+        重用各 trial 已落地的 predictions_*.csv (不重訓)。勝過最佳單模型才採用。
+        資料圍欄: 決策層只選成員 trial_id + 方法; 平均在 ensembler (資料平面) 執行。
+        """
+        ec = self.cfg.ensemble
+        if not getattr(ec, "enabled", False) or self.cfg.dry_run:
+            return None
+        done = [t for t in history if t.status == "done"]
+        if len(done) < ec.min_members:
+            return None
+
+        # 選成員: 決策層 propose_ensemble (無則退回 heuristic 規則)
+        spec = None
+        proposer = getattr(self.advisor, "propose_ensemble", None)
+        if proposer is not None:
+            try:
+                spec = proposer(profile, history, ec)
+            except Exception as e:                       # noqa: BLE001
+                self._say("system", f"決策層選集成成員失敗（{e}），改用規則式選擇。",
+                          kind="status")
+        if spec is None:
+            spec = ensembler.select_members_heuristic(history, ec)
+        if spec is None or len(spec.member_trial_ids) < ec.min_members:
+            self._say("system", "可用成員不足（多樣性/門檻），略過集成。", kind="status")
+            return None
+
+        by_id = {t.trial_id: t for t in done}
+        members = [by_id[t] for t in spec.member_trial_ids if t in by_id]
+        if len(members) < ec.min_members:
+            return None
+        self._say("system",
+                  f"開始集成 {len(members)} 個模型（method={spec.method}）："
+                  + "、".join(m.trial_id for m in members) + "…", kind="status")
+
+        out_dir = os.path.join(self.run_dir, "ensembles", "ensemble")
+        result = ensembler.combine(members, spec, self.eval_cfg,
+                                   self.trials_dir, out_dir)
+        if result.status != "done":
+            self._say("system", f"集成未完成：{result.message}", kind="status")
+            return None
+
+        best_single = self.best.primary_score if self.best else None
+        pm = self.cfg.eval.primary_metric
+        if best_single is not None and result.primary_score > best_single:
+            gain = result.primary_score - best_single
+            self._say("llm",
+                      f"集成勝出：{len(members)} 模型軟投票 primary({pm})="
+                      f"{result.primary_score:.4f}，勝過最佳單模型 {best_single:.4f}"
+                      f"（+{gain:.4f}）。權重={result.spec.weights}。已採用為交付。",
+                      kind="final")
+        else:
+            self._say("llm",
+                      f"集成 primary({pm})={result.primary_score:.4f}"
+                      + (f"，未勝過最佳單模型 {best_single:.4f}，維持單模型交付。"
+                         if best_single is not None else "。"),
+                      kind="final")
+        return result
+
     def _say(self, role: str, text: str, kind: str = "msg", **extra) -> None:
         conversation.append(self.run_dir, role, text, kind=kind, **extra)
 
@@ -990,6 +1053,13 @@ class LoopController:
         for t in history:
             per_encoder.setdefault(t.recipe.encoder.model_key, []).append(t)
 
+        # 收尾集成 (方案 A): 把多個已訓練 trial 組成軟投票 ensemble (不重訓)
+        try:
+            self.ensemble = self._maybe_ensemble(profile, history)
+        except Exception as e:                           # noqa: BLE001
+            self._say("system", f"集成階段失敗（{e}），保留單模型結果。", kind="status")
+            self.ensemble = None
+
         # P5: 多 fold 彙整 — 先在單 fold 篩選, 再把全域最佳 Recipe 擴到所有 fold (§5.7)
         fold_summary = self._maybe_multifold(profile)
 
@@ -1005,13 +1075,15 @@ class LoopController:
 
         report_path = report_mod.write_report(
             self.run_dir, profile, self.cfg, choices, per_encoder,
-            self.best, dry_run=self.cfg.dry_run, fold_summary=fold_summary)
+            self.best, dry_run=self.cfg.dry_run, fold_summary=fold_summary,
+            ensemble=self.ensemble)
 
         return {
             "profile": profile,
             "choices": choices,
             "per_encoder": per_encoder,
             "best": self.best,
+            "ensemble": self.ensemble,
             "n_trials": self.n_trials,
             "fold_summary": fold_summary,
             "report_path": report_path,

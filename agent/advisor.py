@@ -11,8 +11,8 @@ from . import encoder_registry as reg
 from . import presets
 from .privacy.facts import ErrorFacts
 from .schemas import (
-    DatasetProfile, EncoderChoice, HeadSpec, HyperParams, InfoRequest, Recipe,
-    TrialResult, NextAction, ComponentRef, SearchOverride,
+    DatasetProfile, EncoderChoice, EnsembleSpec, HeadSpec, HyperParams,
+    InfoRequest, Recipe, TrialResult, NextAction, ComponentRef, SearchOverride,
 )
 
 # 超參起點 (default / paper / mae + 使用者自訂) 現由 presets 模組管理, 可於 web 編輯。
@@ -53,6 +53,12 @@ class Advisor(Protocol):
                              discussion: list[dict]) -> SearchOverride: ...
     # 未來: 依資料提示不同下游任務起點供選擇 (§5.8)
     def suggest_task_templates(self, profile: DatasetProfile) -> list: ...
+    # 收尾集成 (docs/ensemble_design.md): 從已完成 trial 選 ≥2 個組 ensemble。
+    # 只選 trial_id + 方法 (metadata); 實際機率平均由 agent/ensembler 在資料平面執行。
+    # 回 None = 不值得集成。ensemble_cfg = config.EnsembleConfig。
+    def propose_ensemble(self, profile: DatasetProfile,
+                         history: list[TrialResult],
+                         ensemble_cfg) -> Optional[EnsembleSpec]: ...
 
 
 # 使用者訊息中的中斷關鍵字
@@ -186,6 +192,13 @@ class HeuristicAdvisor:
     def plan_information(self, profile: DatasetProfile) -> InfoRequest:
         """規則式決策不需要額外資訊 — 它用的欄位 DatasetProfile 都有。"""
         return InfoRequest()
+
+    def propose_ensemble(self, profile: DatasetProfile,
+                         history: list[TrialResult],
+                         ensemble_cfg) -> Optional[EnsembleSpec]:
+        """規則式選成員: 委派給 ensembler 的門檻 + encoder 去重規則。"""
+        from . import ensembler
+        return ensembler.select_members_heuristic(history, ensemble_cfg)
 
     def propose_debug(self, profile: DatasetProfile, encoder: EncoderChoice,
                       trial: TrialResult, error_facts: ErrorFacts,

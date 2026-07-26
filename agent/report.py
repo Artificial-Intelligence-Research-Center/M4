@@ -28,7 +28,8 @@ def _fmt_metrics(m: dict, keys: list[str]) -> str:
 
 def write_report(run_dir: str, profile: DatasetProfile, cfg: AgentConfig,
                  choices, per_encoder: dict, best: Optional[TrialResult],
-                 dry_run: bool = False, fold_summary: Optional[dict] = None) -> str:
+                 dry_run: bool = False, fold_summary: Optional[dict] = None,
+                 ensemble=None) -> str:
     keys = cfg.eval.report_metrics
     lines: list[str] = []
     lines.append(f"# 自動微調報告 — {os.path.basename(run_dir)}\n")
@@ -82,6 +83,28 @@ def write_report(run_dir: str, profile: DatasetProfile, cfg: AgentConfig,
                      f"{p['mean']:.4f} ± {p['std']:.4f} (n={p['n']})")
         for k, mv in sorted(fold_summary["metrics"].items()):
             lines.append(f"  - {k}: {mv['mean']:.4f} ± {mv['std']:.4f}")
+
+    if ensemble is not None and ensemble.status == "done":
+        best_s = best.primary_score if best is not None else None
+        won = best_s is not None and ensemble.primary_score > best_s
+        lines.append("\n## 集成 (Ensemble)\n")
+        lines.append(f"- **成員** ({len(ensemble.spec.member_trial_ids)}): "
+                     + "、".join(f"`{t}`" for t in ensemble.spec.member_trial_ids))
+        lines.append(f"- **方法**: {ensemble.spec.method}"
+                     + (f"，權重 {ensemble.spec.weights}" if ensemble.spec.weights else ""))
+        lines.append(f"- **primary({cfg.eval.primary_metric})**: "
+                     f"{ensemble.primary_score:.4f}"
+                     + (f"（vs 最佳單模型 {best_s:.4f}，"
+                        f"{'勝出 +' + format(ensemble.primary_score - best_s, '.4f') if won else '未勝出'}）"
+                        if best_s is not None else ""))
+        lines.append(f"- **指標**: {_fmt_metrics(ensemble.metrics, keys)}")
+        lines.append(f"- **對齊樣本數**: {ensemble.n_samples}")
+        lines.append(f"- **集成 predictions**: `{ensemble.pred_path}`")
+        if ensemble.member_ckpts:
+            lines.append(f"- **成員 checkpoints**（推論需同時載入）:")
+            for c in ensemble.member_ckpts:
+                lines.append(f"  - `{c}`")
+        lines.append(f"- **交付**: {'集成勝出，建議以集成交付' if won else '維持最佳單模型交付'}")
 
     lines.append(f"\n_共執行 {sum(len(v) for v in per_encoder.values())} trials，"
                  f"ledger: `{os.path.join(run_dir, 'ledger.jsonl')}`_\n")
