@@ -287,7 +287,8 @@
            background:#f4f8ff;border:1px solid #cfe0fb;color:#333"></div>
       <div class="muted" style="font-size:12px;margin-bottom:10px">
         會在<b>既有解答樹之後繼續</b>（跳過 draft，只跑 improve/debug/resume），完成後
-        重新產生該 fold 與<b>父層彙整</b>報告。用來看個別 fold 在更大 budget 下能否更好。</div>
+        重新產生該 fold 與<b>父層彙整</b>報告。<b>trial 數與 patience（連續無提升）都會沿用既有樹接續</b>
+        （不是從 0 重來），所以要把 max_trials／patience 設成<b>大於目前值</b>才會真的多跑。</div>
       <label>max_trials（每個 fold 的總輪數上限；調大＝追加步數）</label>
       <input type="number" id="rf-maxtrials" min="1" style="width:100%">
       <label style="margin-top:8px">patience（連續無提升幾輪就停；draft/debug 不計）</label>
@@ -545,25 +546,38 @@ function _openResume(target, maxt, pat, info){
   const inf=document.getElementById('rf-info');
   if(inf){
     const nd=(info && info.nDone!=null)?info.nDone:null;
+    const st=(info && info.stale!=null)?info.stale:null;
+    const p=parseInt(pat)||4;
     let s=`上次設定：max_trials=<b>${maxt}</b> · patience=<b>${pat}</b>`;
-    if(nd!=null){
-      const p=parseInt(pat)||4;
-      s+=`　|　已完成 trials（${esc(info.scope||'')}）=<b>${nd}</b>`
-        +`<br>⚠ resume 會在既有樹後繼續，所以 <b>max_trials 要設成大於已完成數</b>才會真的追加；`
-        +`例如設 <b>${nd+p}</b>（＝已完成 ${nd} + patience ${p}）約再多跑 ${p} 輪。`;
+    if(nd!=null) s+=`　|　已完成 trials（${esc(info.scope||'')}）=<b>${nd}</b>`;
+    if(st!=null) s+=`　|　目前連續無提升＝<b>${st}</b> / ${pat} 輪`;
+    if(nd!=null || st!=null){
+      s+='<br>';
+      const byPatience = (st!=null && st>=p);
+      const byMax = (nd!=null && nd>=(parseInt(maxt)||0));
+      if(byPatience){
+        s+=`🛑 這個 fold <b>因 patience 停</b>（連續 ${st} 輪無提升；<b>resume 會沿用此計數</b>）——`
+          +`要再跑就把 <b>patience 設成大於 ${st}</b>（例如 <b>${st+4}</b>），否則 resume 跑不到 1~2 輪就又停。`
+          +(byMax?` 同時 max_trials 也要 > ${nd}。`:``);
+      } else if(byMax){
+        s+=`✅ 這個 fold <b>因 max_trials 停</b>（跑滿 ${nd} 輪、patience 還沒滿）——把 `
+          +`<b>max_trials 設成大於 ${nd}</b> 即可追加，例如 <b>${nd+p}</b>。`;
+      } else if(nd!=null){
+        s+=`把 <b>max_trials 設成大於已完成數 ${nd}</b> 才會真的追加（例如 <b>${nd+p}</b>）。`;
+      }
     }
     inf.innerHTML=s;
   }
   document.getElementById('resumefull-modal').style.display='block';
 }
-function openResumeFull(run, maxt, pat, maxDone){
+function openResumeFull(run, maxt, pat, maxDone, maxStale){
   _openResume({endpoint:'resume_full/', run:run, label:'全部 fold（'+run+'）'},
-              maxt, pat, {nDone:maxDone, scope:'各 fold 最多者'});
+              maxt, pat, {nDone:maxDone, stale:maxStale, scope:'各 fold 最多者'});
 }
-function openResumeFold(parentRun, idx, name, maxt, pat, nDone){
+function openResumeFold(parentRun, idx, name, maxt, pat, nDone, stale){
   _openResume({endpoint:'resume_run/', run:parentRun+'/fold'+idx,
                label:'Fold '+(idx+1)+'：'+name+'（只繼續這個 fold）'},
-              maxt, pat, {nDone:nDone, scope:'此 fold'});
+              maxt, pat, {nDone:nDone, stale:stale, scope:'此 fold'});
 }
 function closeResumeFull(){ document.getElementById('resumefull-modal').style.display='none'; }
 async function submitResumeFull(){
@@ -675,22 +689,26 @@ function renderParentOverview(j){
   const curPat=((cfgTxt.match(/\bpatience:\s*(\d+)/)||[])[1])||'4';
   const parentRun=document.getElementById('rs-run').value;
   const maxDone=Math.max(0, ...folds.map(e=>e.n_done||0));
+  const maxStale=Math.max(0, ...folds.map(e=>e.stale||0));
   let rows=folds.map(e=>{
-    const nd=(e.n_done!=null?e.n_done:'—');
-    // 每個 fold 各自的「繼續」(只在已完成時可用; 用不同 budget 單獨追加該 fold)
-    const foldCont = e.status==='finished'
-      ? `<button type="button" onclick="openResumeFold('${esc(parentRun)}',${e.index},'${esc(e.name)}',${curMax},${curPat},${e.n_done||0})" style="width:auto;margin:0 0 0 6px;padding:3px 10px;background:#e7f6ec;color:#1a7f4b">繼續</button>`
+    const nd=(e.n_done!=null?e.n_done:0);
+    const fMax=(e.max_trials!=null?e.max_trials:curMax);   // 該 fold 自己的設定 (可能被單獨續過)
+    const fPat=(e.patience!=null?e.patience:curPat);
+    const st=(e.stale!=null?e.stale:0);
+    // 每個 fold 各自的「繼續」(已完成或已停才可用; 用不同 budget 單獨追加該 fold)
+    const foldCont = (e.status==='finished' || e.status==='failed')
+      ? `<button type="button" onclick="openResumeFold('${esc(parentRun)}',${e.index},'${esc(e.name)}',${fMax},${fPat},${nd},${st})" style="width:auto;margin:0 0 0 6px;padding:3px 10px;background:#e7f6ec;color:#1a7f4b">繼續</button>`
       : '';
     return `<tr>`
       +`<td>Fold ${e.index+1}</td><td>${esc(e.name)}</td>`
       +`<td>${e.device!=null?('GPU '+e.device):'—'}</td><td>${pill(e.status)}</td>`
-      +`<td>${nd}</td><td>${e.primary!=null?fmt(e.primary):'—'}</td>`
+      +`<td>${nd} / ${fMax}</td><td>${st} / ${fPat}</td><td>${e.primary!=null?fmt(e.primary):'—'}</td>`
       +`<td><button type="button" onclick="switchFold(${e.index})" style="width:auto;margin:0;padding:3px 10px">查看</button>${foldCont}</td>`
       +`</tr>`;
   }).join('');
   const contBtn = pf.done
     ? `<button type="button" class="primary" style="width:auto;margin:0;padding:5px 14px"
-         onclick="openResumeFull('${esc(parentRun)}',${curMax},${curPat},${maxDone})">▶ 繼續全部 fold（在既有樹後追加步數）</button>`
+         onclick="openResumeFull('${esc(parentRun)}',${curMax},${curPat},${maxDone},${maxStale})">▶ 繼續全部 fold（在既有樹後追加步數）</button>`
     : `<span class="muted" style="font-size:12px">執行中…完成後可「繼續」再追加步數</span>`;
   const body=`<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">${contBtn}</div>`
     +`<div class="muted" style="margin-bottom:6px">逐 fold 平行搜尋：`
@@ -698,7 +716,7 @@ function renderParentOverview(j){
     +`（目前設定 max_trials=<b>${curMax}</b> · patience=<b>${curPat}</b>）。`
     +`點「查看」切換；「繼續」可用不同 budget 單獨追加該 fold（看個別 fold 能否更好）。</div>`
     +`<table class="kv"><tr><th>fold</th><th>資料</th><th>GPU</th><th>狀態</th>`
-    +`<th>trials</th><th>最佳 primary</th><th></th></tr>${rows}</table>`;
+    +`<th>trials（完成/上限）</th><th>無提升（連續/patience）</th><th>最佳 primary</th><th></th></tr>${rows}</table>`;
   let html=cell('🧩 逐 fold 平行總覽'+(pf.done?'（已全部完成）':'（執行中）'),
     folds.filter(e=>e.status==='finished').length+' / '+folds.length+' 完成', body, 'parent-overview');
   if(j.config) html+=cell('本次 run 設定 (config.yaml)','', '<pre style="max-height:240px">'+esc(j.config)+'</pre>', 'config');

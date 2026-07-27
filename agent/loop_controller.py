@@ -732,7 +732,9 @@ class LoopController:
         # trial_id 用資料集**假名** — 這些 id 會出現在送往 LLM 的歷史與解答樹中,
         # 用真實目錄名等於每一輪都把資料集名稱送出去 (docs/data_firewall_design.md §4.3)
         ds_name = self._ds_tag
-        stale = 0
+        # patience 計數 (stale): resume 時**由既有樹重算並沿用**, 不從 0 重來 —— 讓
+        # patience 成為整個搜尋 (含歷次 resume) 的累計「連續無提升」預算, 與 UI 顯示一致。
+        stale = self._replay_stale(history) if preloaded else 0
         max_rounds = self.cfg.loop.max_trials
         max_attempts = max_rounds * 3  # 護欄: 選點連續失敗時不空轉
 
@@ -1041,6 +1043,26 @@ class LoopController:
             return self.ensemble
         self._run_ensemble_round(profile, history, "final")
         return self.ensemble
+
+    def _replay_stale(self, history: list) -> int:
+        """由既有 history 重放算出目前的 stale (連續 improve/resume 無提升輪數)。
+
+        規則與主迴圈一致 (見下方): 有實質提升→歸零; improve/resume 無提升→+1;
+        draft/debug 不計。resume 時用此值接續 patience 計數 (與 web 顯示的一致)。
+        """
+        md = self.cfg.loop.min_delta
+        best_s, stale = None, 0
+        for t in history:
+            if t.status != "done":
+                continue
+            stage = ((t.recipe.provenance or {}).get("search") or {}).get("stage", "draft")
+            if best_s is None or t.primary_score > best_s + md:
+                stale = 0
+            elif stage in ("improve", "resume"):
+                stale += 1
+            if best_s is None or t.primary_score > best_s:
+                best_s = t.primary_score
+        return stale
 
     def _narrate_best(self, profile: DatasetProfile) -> str:
         """報告用: 讓決策層 (LLM) 把最佳 recipe 寫成一段白話說明; 不支援時回空字串。"""

@@ -86,6 +86,8 @@ pip install -r requirements.txt
 
 dataset請於下載後依照提供的5-fold列表切分後放入`data`資料夾中，例如: ATPOS2019資料集的fold1請放入`data/5_fold_APTOS2019/APTOS2019_seed42_fold0`
 
+若要放入自己的資料集，格式規範（目錄結構、命名慣例、驗證方式）與匯入步驟請見 [`docs/dataset_format.md`](docs/dataset_format.md)。
+
 ### Supervised Fine-Tuning Datasets (Fundus & Natural Image)
 
 在SFT實驗中，我們使用Augmented Ocular Disease (AOD)資料集作為醫療影像的SFT資料集，並使用Imagenet-1k資料集作為自然影像的SFT資料集，我們將於Experiments中比較兩者的效果。

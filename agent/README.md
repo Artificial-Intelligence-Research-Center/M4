@@ -2,6 +2,7 @@
 
 設計文件：[`../docs/auto_finetune_agent_design.md`](../docs/auto_finetune_agent_design.md)
 資料圍欄：[`../docs/data_firewall_design.md`](../docs/data_firewall_design.md)
+資料集格式與匯入：[`../docs/dataset_format.md`](../docs/dataset_format.md)
 決策層 skill 模板：[`../.claude/skills/finetune-advisor/`](../.claude/skills/finetune-advisor/)
 
 > **資料圍欄 (Data Firewall)**：LLM 永遠看不到使用者的輸入資料 —— 影像、檔名、路徑、

@@ -632,6 +632,11 @@ def resume_run():
             cfg.loop.max_trials = int(mt)
         except ValueError:
             pass
+    if (pt := request.form.get("patience", "").strip()):
+        try:
+            cfg.loop.patience = int(pt)
+        except ValueError:
+            pass
     if (g := request.form.get("guidance", "").strip()):
         cfg.advisor.guidance = g
 
@@ -764,6 +769,45 @@ def resume_full():
     return jsonify({"ok": True, "run": run})
 
 
+def _enrich_parallel_folds(parent_dir, folds):
+    """對每個 fold 子執行即時補上『從 ledger/config 直接算出的』真實狀態 — 不依賴
+    folds.json 是否事後存了這些 (舊 run 也正確):
+      n_done   = 已完成 trial 數 (排除 ensemble 偽 trial)
+      max_trials/patience/min_delta = 該 fold 自己的 config (可能被單獨續過)
+      stale    = 目前連續 improve/resume 無提升的輪數 (重放 ledger; 判斷是否因 patience 停)
+    """
+    for e in folds:
+        sub = os.path.join(parent_dir, e.get("subdir", ""))
+        md = 0.0
+        try:
+            fc = AgentConfig.load(os.path.join(sub, "config.yaml"))
+            e["max_trials"] = fc.loop.max_trials
+            e["patience"] = fc.loop.patience
+            md = fc.loop.min_delta
+        except Exception:
+            pass
+        try:
+            done = [t for t in Ledger(sub).history() if t.status == "done"
+                    and t.recipe.encoder.model_key != "ensemble"]
+            e["n_done"] = len(done)
+            # 重放 LoopController 的 stale 規則: 有提升→歸零; improve/resume 無提升→+1;
+            # draft/debug 不計。best 用嚴格大於更新。
+            best, stale = None, 0
+            for t in done:
+                stage = ((t.recipe.provenance or {}).get("search") or {}).get("stage", "draft")
+                prev = best
+                if prev is None or t.primary_score > prev + md:
+                    stale = 0
+                elif stage in ("improve", "resume"):
+                    stale += 1
+                if prev is None or t.primary_score > prev:
+                    best = t.primary_score
+            e["stale"] = stale
+        except Exception:
+            e.setdefault("n_done", 0)
+    return folds
+
+
 @app.route("/run_status")
 def run_status():
     """整體進度: ledger 全 trial (含完整 Recipe 參數) + 當前 trial epoch + report.md。"""
@@ -863,7 +907,7 @@ def run_status():
             with open(fjp, encoding="utf8") as fh:
                 fj = json.load(fh)
             if fj.get("mode") == "per_fold_parallel":
-                parallel_folds = {"folds": fj.get("folds") or [],
+                parallel_folds = {"folds": _enrich_parallel_folds(run_dir, fj.get("folds") or []),
                                   "devices": fj.get("devices") or [],
                                   "done": bool(fj.get("done"))}
             else:
@@ -895,7 +939,7 @@ def run_status():
                 subs = {os.path.realpath(os.path.join(parent_dir, e.get("subdir", "")))
                         for e in pj.get("folds", [])}
                 if pj.get("mode") == "per_fold_parallel" and run_dir in subs:
-                    parallel_folds = {"folds": pj.get("folds") or [],
+                    parallel_folds = {"folds": _enrich_parallel_folds(parent_dir, pj.get("folds") or []),
                                       "devices": pj.get("devices") or [],
                                       "done": bool(pj.get("done"))}
             except Exception:
