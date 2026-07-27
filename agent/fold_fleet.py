@@ -164,13 +164,15 @@ def detect_gpus() -> list[int]:
 # ---------------------------------------------------------------------------
 # 每個 fold 的啟動 (可替換為 PyTorchJobLauncher)
 # ---------------------------------------------------------------------------
-def _launch_fold(child_cfg: AgentConfig, sub_dir: str) -> dict:
+def _launch_fold(child_cfg: AgentConfig, sub_dir: str, resume: bool = False) -> dict:
     """本機啟動器: 在本行程內直接跑一個 fold 的完整搜尋 (訓練仍走子程序)。
 
+    resume=True: 從該 fold 既有 ledger 重建解答樹後繼續 (跳過 draft, 只跑
+    improve/debug/resume), 依新的 max_trials/patience 追加步數並重產報告。
     未來多節點: 換成提交 PyTorchJob 並輪詢, 回傳同形狀的 dict (best / n_trials / report_path)。
     """
     from . import auto_finetune
-    return auto_finetune.run(child_cfg, run_dir=sub_dir)
+    return auto_finetune.run(child_cfg, run_dir=sub_dir, resume=resume)
 
 
 def _is_resource_error(err: Exception) -> bool:
@@ -222,8 +224,12 @@ def _write_manifest(parent_dir: str, entries: list, devices: list, done: bool) -
 # 艦隊主流程
 # ---------------------------------------------------------------------------
 def run_fleet(cfg: AgentConfig, run_dir: str,
-              devices: Optional[list] = None) -> dict:
-    """對每個 sibling fold 平行跑一次完整搜尋 (各自獨立子執行), 最後彙整。"""
+              devices: Optional[list] = None, resume: bool = False) -> dict:
+    """對每個 sibling fold 平行跑一次完整搜尋 (各自獨立子執行), 最後彙整。
+
+    resume=True: 每個 fold 從既有樹後繼續 (跳過 draft, 依新的 max_trials/patience
+    追加 improve/debug/resume 步數), 最後重產父層彙整報告。
+    """
     folds = discover_folds(cfg.data_path)
     parent = os.path.abspath(run_dir)
     os.makedirs(parent, exist_ok=True)
@@ -232,7 +238,7 @@ def run_fleet(cfg: AgentConfig, run_dir: str,
     if len(folds) <= 1:
         c = cfg.model_copy(deep=True)
         c.eval.aggregation = "single"
-        return _launch_fold(c, parent)
+        return _launch_fold(c, parent, resume=resume)
 
     devices = devices or detect_gpus()
     ttype = cfg.task.get("type", "classification")
@@ -250,7 +256,10 @@ def run_fleet(cfg: AgentConfig, run_dir: str,
                    and getattr(g, "max_folds_per_gpu", 1) > 1)
     flush()
     convo.append(parent, "system",
-                 f"逐 fold 平行搜尋：{len(folds)} 個 fold 平均分配到 {len(devices)} 顆 "
+                 (f"繼續逐 fold 平行搜尋（max_trials={cfg.loop.max_trials}, "
+                  f"patience={cfg.loop.patience}；每個 fold 在既有樹後繼續，跳過 draft）："
+                  if resume else "逐 fold 平行搜尋：")
+                 + f"{len(folds)} 個 fold 平均分配到 {len(devices)} 顆 "
                  f"GPU {devices} 上獨立執行。每個 fold 有自己的對話與結果，"
                  f"可在左側「fold」選擇器切換查看。"
                  + (f"（低利用率時最多 {g.max_folds_per_gpu} 個 fold 共用一卡，"
@@ -294,7 +303,7 @@ def run_fleet(cfg: AgentConfig, run_dir: str,
             attempt = 0
             while True:
                 try:
-                    out = _launch_fold(child, sub)
+                    out = _launch_fold(child, sub, resume=resume)
                     break
                 except Exception as e:            # noqa: BLE001
                     if _is_resource_error(e) and attempt < _OOM_RETRIES:
@@ -308,10 +317,16 @@ def run_fleet(cfg: AgentConfig, run_dir: str,
                     raise
             results[i] = out
             best = out.get("best")
+            ens = out.get("ensemble")
             with lock:
                 entries[i]["status"] = "finished"
                 entries[i]["primary"] = best.primary_score if best else None
                 entries[i]["best"] = best.trial_id if best else None
+                entries[i]["n_done"] = out.get("n_trials", 0)
+                if ens is not None and getattr(ens, "status", "") == "done" and best:
+                    entries[i]["ens_primary"] = ens.primary_score
+                    entries[i]["ens_method"] = ens.spec.method
+                    entries[i]["ens_won"] = ens.primary_score > best.primary_score
             flush()
             convo.append(
                 parent, "system",
@@ -343,6 +358,7 @@ def run_fleet(cfg: AgentConfig, run_dir: str,
     for i in range(len(folds)):
         out = results.get(i) or {}
         best = out.get("best")
+        ens = out.get("ensemble")             # 該 fold 子執行的收尾集成結果
         row = {"fold": entries[i]["name"], "n_trials": out.get("n_trials", 0),
                "device": entries[i]["device"], "subdir": f"fold{i}",
                "status": entries[i]["status"]}
@@ -352,6 +368,10 @@ def run_fleet(cfg: AgentConfig, run_dir: str,
                        primary_score=best.primary_score, metrics=best.metrics,
                        hparams=best.recipe.hparams.model_dump(),
                        trial_id=best.trial_id)
+            if ens is not None and getattr(ens, "status", "") == "done":
+                row["ens_primary"] = ens.primary_score
+                row["ens_method"] = ens.spec.method
+                row["ens_won"] = ens.primary_score > best.primary_score
             best_trials.append(best)
             scores.append(best.primary_score)
             if overall is None or best.primary_score > overall.primary_score:
@@ -362,6 +382,36 @@ def run_fleet(cfg: AgentConfig, run_dir: str,
            "best_trials": best_trials, "primary": mreg.aggregate(scores),
            "metrics": mreg.aggregate_metrics([t.metrics for t in best_trials])}
 
+    # ---- 跨 fold 集成: 用各 fold 最佳模型在共同 test set 上找最佳組合 ----
+    cross = None
+    cf_members = []
+    for i in range(len(folds)):
+        out = results.get(i) or {}
+        b = out.get("best")
+        if b is not None and b.trial_id:
+            td = os.path.join(parent, f"fold{i}", "trials", b.trial_id)
+            if os.path.isdir(td):
+                cf_members.append({"label": f"fold{i}:{b.recipe.encoder.model_key}",
+                                   "task_dir": td, "ckpt": b.ckpt_path,
+                                   "primary": b.primary_score})
+    if len(cf_members) >= 2:
+        try:
+            from . import ensembler
+            cross = ensembler.cross_fold_combine(
+                cf_members, cfg.eval, os.path.join(parent, "ensembles", "cross_fold"))
+            if cross.status == "done":
+                convo.append(parent, "system",
+                             f"跨 fold 集成：用 {len(cf_members)} 個 fold 的最佳模型，"
+                             f"選出 {len(cross.spec.member_trial_ids)} 個組合，"
+                             f"primary={cross.primary_score:.4f}（{cross.message}）。",
+                             kind="decision")
+            else:
+                convo.append(parent, "system", f"跨 fold 集成未完成：{cross.message}",
+                             kind="status")
+        except Exception as e:                        # noqa: BLE001
+            convo.append(parent, "system", f"跨 fold 集成失敗（{e}）。", kind="status")
+            cross = None
+
     per_encoder: dict = {}
     for t in best_trials:
         per_encoder.setdefault(t.recipe.encoder.model_key, []).append(t)
@@ -370,21 +420,108 @@ def run_fleet(cfg: AgentConfig, run_dir: str,
         profile = dataset_analyzer.analyze(cfg.data_path, task_type=ttype)
         report_path = report_mod.write_report(
             parent, profile, cfg, choices, per_encoder, overall,
-            per_fold_summary=pfs)
+            per_fold_summary=pfs, cross_fold=cross)
     except Exception:
         report_path = None
 
     p = pfs["primary"]
+    cf_note = (f"；跨 fold 集成 primary={cross.primary_score:.4f}"
+               if cross is not None and cross.status == "done" else "")
     convo.append(parent, "system",
-                 f"全部 fold 完成。整體最佳 primary="
+                 f"全部 fold 完成。整體最佳單模型 primary="
                  + (f"{overall.primary_score:.4f}" if overall else "—")
                  + f"；各 fold 最佳 mean±std = {p['mean']:.4f}±{p['std']:.4f}"
-                   f"（n={p['n']}）。", kind="final")
+                   f"（n={p['n']}）" + cf_note + "。", kind="final")
     flush(done=True)
     return {"best": overall,
             "n_trials": sum(r.get("n_trials", 0) for r in per_fold_rows),
-            "report_path": report_path, "run_dir": parent,
+            "report_path": report_path, "run_dir": parent, "cross_fold": cross,
             "per_fold_summary": pfs, "ensemble": None, "fold_summary": None}
+
+
+def reaggregate_parent(parent_dir: str):
+    """重讀各 fold 目前狀態, 重產父層彙整報告 (含跨 fold 集成) + 更新 folds.json。
+
+    用於『單獨繼續某個 fold』之後 — 該 fold 自己的 report 由其子執行更新, 但父層彙整
+    需要在這裡一併刷新, 否則全域報告會過時。從各 fold 的 ledger 重讀最佳 trial。
+    回傳新的 report 路徑 (失敗回 None)。
+    """
+    parent = os.path.abspath(parent_dir)
+    try:
+        with open(os.path.join(parent, "folds.json"), encoding="utf8") as f:
+            pj = json.load(f)
+    except Exception:
+        return None
+    if pj.get("mode") != "per_fold_parallel":
+        return None
+    try:
+        cfg = AgentConfig.load(os.path.join(parent, "config.yaml"))
+    except Exception:
+        return None
+    from .ledger import Ledger
+
+    entries = pj.get("folds", [])
+    per_fold_rows, best_trials, scores, cf_members = [], [], [], []
+    overall = None
+    for ent in entries:
+        sub = os.path.join(parent, ent.get("subdir", ""))
+        try:
+            hist = Ledger(sub).history()
+        except Exception:
+            hist = []
+        done = [t for t in hist if t.status == "done"
+                and t.recipe.encoder.model_key != "ensemble"]
+        best = max(done, key=lambda t: t.primary_score, default=None)
+        row = {"fold": ent.get("name"), "n_trials": len(done),
+               "device": ent.get("device"), "subdir": ent.get("subdir"),
+               "status": ent.get("status")}
+        ent["n_done"] = len(done)                            # folds.json 帶上 trial 數
+        for k in ("ens_primary", "ens_method", "ens_won"):   # 沿用完成時存下的集成資訊
+            if ent.get(k) is not None:
+                row[k] = ent[k]
+        if best is not None:
+            row.update(encoder=best.recipe.encoder.model_key,
+                       adaptation=best.recipe.encoder.adaptation,
+                       primary_score=best.primary_score, metrics=best.metrics,
+                       hparams=best.recipe.hparams.model_dump(),
+                       trial_id=best.trial_id)
+            ent["primary"], ent["best"] = best.primary_score, best.trial_id
+            best_trials.append(best)
+            scores.append(best.primary_score)
+            if overall is None or best.primary_score > overall.primary_score:
+                overall = best
+            td = os.path.join(sub, "trials", best.trial_id)
+            if os.path.isdir(td):
+                cf_members.append({"label": f"{ent.get('subdir')}:{best.recipe.encoder.model_key}",
+                                   "task_dir": td, "ckpt": best.ckpt_path,
+                                   "primary": best.primary_score})
+        per_fold_rows.append(row)
+
+    pfs = {"folds": [r["fold"] for r in per_fold_rows], "per_fold": per_fold_rows,
+           "best_trials": best_trials, "primary": mreg.aggregate(scores),
+           "metrics": mreg.aggregate_metrics([t.metrics for t in best_trials])}
+    cross = None
+    if len(cf_members) >= 2:
+        try:
+            from . import ensembler
+            cross = ensembler.cross_fold_combine(
+                cf_members, cfg.eval, os.path.join(parent, "ensembles", "cross_fold"))
+        except Exception:
+            cross = None
+    per_encoder: dict = {}
+    for t in best_trials:
+        per_encoder.setdefault(t.recipe.encoder.model_key, []).append(t)
+    choices = [EncoderChoice(model_key=k, adaptation="finetune") for k in per_encoder]
+    rp = None
+    try:
+        profile = dataset_analyzer.analyze(
+            cfg.data_path, task_type=cfg.task.get("type", "classification"))
+        rp = report_mod.write_report(parent, profile, cfg, choices, per_encoder,
+                                     overall, per_fold_summary=pfs, cross_fold=cross)
+    except Exception:
+        rp = None
+    _write_manifest(parent, entries, pj.get("devices") or [], True)
+    return rp
 
 
 # ---------------------------------------------------------------------------

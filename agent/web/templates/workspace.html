@@ -275,6 +275,31 @@
     </div>
   </div>
 </div>
+
+<!-- 繼續（逐 fold 平行）— 調整迴圈參數對話框 -->
+<div id="resumefull-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(15,23,42,.5)"
+     onclick="if(event.target===this) closeResumeFull()">
+  <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+    <div class="card" style="pointer-events:auto;width:min(460px,94vw);margin:0;box-shadow:0 12px 40px rgba(0,0,0,.35)">
+      <h2 style="margin:0 0 6px;font-size:15px">繼續搜尋 — 調整迴圈參數</h2>
+      <div id="rf-target" style="font-size:12px;margin-bottom:6px;color:#1a4fa0"></div>
+      <div id="rf-info" style="font-size:12px;margin-bottom:8px;padding:7px 10px;border-radius:6px;
+           background:#f4f8ff;border:1px solid #cfe0fb;color:#333"></div>
+      <div class="muted" style="font-size:12px;margin-bottom:10px">
+        會在<b>既有解答樹之後繼續</b>（跳過 draft，只跑 improve/debug/resume），完成後
+        重新產生該 fold 與<b>父層彙整</b>報告。用來看個別 fold 在更大 budget 下能否更好。</div>
+      <label>max_trials（每個 fold 的總輪數上限；調大＝追加步數）</label>
+      <input type="number" id="rf-maxtrials" min="1" style="width:100%">
+      <label style="margin-top:8px">patience（連續無提升幾輪就停；draft/debug 不計）</label>
+      <input type="number" id="rf-patience" min="0" style="width:100%">
+      <div id="rf-msg" class="muted" style="font-size:12px;margin-top:8px"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button type="button" class="primary" onclick="submitResumeFull()" style="flex:1;margin:0">開始繼續</button>
+        <button type="button" onclick="closeResumeFull()" style="background:#f4f5f7;color:#333;margin:0">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block script %}
@@ -509,8 +534,59 @@ function openTrialModal(tid){
   m.style.display='block';
 }
 function closeTrialModal(){ document.getElementById('trial-modal').style.display='none'; }
+// ---- 繼續（逐 fold 平行）: 調整迴圈參數 → 在既有樹後追加步數（全部或單一 fold）----
+let _rfTarget=null;   // {endpoint, run, label}
+function _openResume(target, maxt, pat, info){
+  _rfTarget=target;
+  document.getElementById('rf-maxtrials').value=maxt;
+  document.getElementById('rf-patience').value=pat;
+  document.getElementById('rf-msg').textContent='';
+  const t=document.getElementById('rf-target'); if(t) t.innerHTML='對象：<b>'+esc(target.label)+'</b>';
+  const inf=document.getElementById('rf-info');
+  if(inf){
+    const nd=(info && info.nDone!=null)?info.nDone:null;
+    let s=`上次設定：max_trials=<b>${maxt}</b> · patience=<b>${pat}</b>`;
+    if(nd!=null){
+      const p=parseInt(pat)||4;
+      s+=`　|　已完成 trials（${esc(info.scope||'')}）=<b>${nd}</b>`
+        +`<br>⚠ resume 會在既有樹後繼續，所以 <b>max_trials 要設成大於已完成數</b>才會真的追加；`
+        +`例如設 <b>${nd+p}</b>（＝已完成 ${nd} + patience ${p}）約再多跑 ${p} 輪。`;
+    }
+    inf.innerHTML=s;
+  }
+  document.getElementById('resumefull-modal').style.display='block';
+}
+function openResumeFull(run, maxt, pat, maxDone){
+  _openResume({endpoint:'resume_full/', run:run, label:'全部 fold（'+run+'）'},
+              maxt, pat, {nDone:maxDone, scope:'各 fold 最多者'});
+}
+function openResumeFold(parentRun, idx, name, maxt, pat, nDone){
+  _openResume({endpoint:'resume_run/', run:parentRun+'/fold'+idx,
+               label:'Fold '+(idx+1)+'：'+name+'（只繼續這個 fold）'},
+              maxt, pat, {nDone:nDone, scope:'此 fold'});
+}
+function closeResumeFull(){ document.getElementById('resumefull-modal').style.display='none'; }
+async function submitResumeFull(){
+  if(!_rfTarget) return;
+  const mt=document.getElementById('rf-maxtrials').value.trim();
+  const pt=document.getElementById('rf-patience').value.trim();
+  const msg=document.getElementById('rf-msg');
+  const fd=new FormData(); fd.append('run', _rfTarget.run);
+  if(mt) fd.append('max_trials', mt);
+  if(pt) fd.append('patience', pt);
+  msg.textContent='排入中…';
+  try{
+    const j=await (await fetch(_rfTarget.endpoint,{method:'POST',body:fd})).json();
+    if(!j.ok){ msg.innerHTML='<span style="color:#b42318">'+esc(j.error||'失敗')+'</span>'; return; }
+  }catch(e){ msg.innerHTML='<span style="color:#b42318">送出失敗</span>'; return; }
+  closeResumeFull();
+  const f=document.getElementById('rs-fold'); if(f) f.value='';   // 切回父層總覽看進度
+  pollRunStatus();
+}
 document.addEventListener('keydown', e=>{
   if(e.key!=='Escape') return;
+  const rf=document.getElementById('resumefull-modal');
+  if(rf && rf.style.display!=='none'){ closeResumeFull(); return; }
   const m=document.getElementById('trial-modal');
   if(m && m.style.display!=='none'){ closeTrialModal(); return; }  // 先關對話框
   exitAllFullscreen();                                             // 再退出單格全螢幕
@@ -593,21 +669,42 @@ function renderParentOverview(j){
   const pf=j.parallel_folds, folds=pf.folds||[];
   const pill=st=>{const m={finished:'done',running:'running',queued:'pending',failed:'error'}[st]||'pending';
     return `<span class="pill ${m}">${esc(st||'')}</span>`;};
-  let rows=folds.map(e=>`<tr>`
-    +`<td>Fold ${e.index+1}</td><td>${esc(e.name)}</td>`
-    +`<td>${e.device!=null?('GPU '+e.device):'—'}</td><td>${pill(e.status)}</td>`
-    +`<td>${e.primary!=null?fmt(e.primary):'—'}</td>`
-    +`<td><button type="button" onclick="switchFold(${e.index})" style="width:auto;margin:0;padding:3px 10px">查看</button></td>`
-    +`</tr>`).join('');
-  const body=`<div class="muted" style="margin-bottom:6px">逐 fold 平行搜尋：`
-    +`${folds.length} 個 fold 分配到 GPU ${(pf.devices||[]).join(', ')||'—'} 上獨立執行。`
-    +`每個 fold 有自己的對話與結果，點「查看」或用左上「fold」選擇器切換。</div>`
+  // 目前 max_trials / patience (從 config.yaml 文字解析, 供繼續對話框預填)
+  const cfgTxt=j.config||'';
+  const curMax=((cfgTxt.match(/max_trials:\s*(\d+)/)||[])[1])||'12';
+  const curPat=((cfgTxt.match(/\bpatience:\s*(\d+)/)||[])[1])||'4';
+  const parentRun=document.getElementById('rs-run').value;
+  const maxDone=Math.max(0, ...folds.map(e=>e.n_done||0));
+  let rows=folds.map(e=>{
+    const nd=(e.n_done!=null?e.n_done:'—');
+    // 每個 fold 各自的「繼續」(只在已完成時可用; 用不同 budget 單獨追加該 fold)
+    const foldCont = e.status==='finished'
+      ? `<button type="button" onclick="openResumeFold('${esc(parentRun)}',${e.index},'${esc(e.name)}',${curMax},${curPat},${e.n_done||0})" style="width:auto;margin:0 0 0 6px;padding:3px 10px;background:#e7f6ec;color:#1a7f4b">繼續</button>`
+      : '';
+    return `<tr>`
+      +`<td>Fold ${e.index+1}</td><td>${esc(e.name)}</td>`
+      +`<td>${e.device!=null?('GPU '+e.device):'—'}</td><td>${pill(e.status)}</td>`
+      +`<td>${nd}</td><td>${e.primary!=null?fmt(e.primary):'—'}</td>`
+      +`<td><button type="button" onclick="switchFold(${e.index})" style="width:auto;margin:0;padding:3px 10px">查看</button>${foldCont}</td>`
+      +`</tr>`;
+  }).join('');
+  const contBtn = pf.done
+    ? `<button type="button" class="primary" style="width:auto;margin:0;padding:5px 14px"
+         onclick="openResumeFull('${esc(parentRun)}',${curMax},${curPat},${maxDone})">▶ 繼續全部 fold（在既有樹後追加步數）</button>`
+    : `<span class="muted" style="font-size:12px">執行中…完成後可「繼續」再追加步數</span>`;
+  const body=`<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">${contBtn}</div>`
+    +`<div class="muted" style="margin-bottom:6px">逐 fold 平行搜尋：`
+    +`${folds.length} 個 fold 分配到 GPU ${(pf.devices||[]).join(', ')||'—'} 上獨立執行`
+    +`（目前設定 max_trials=<b>${curMax}</b> · patience=<b>${curPat}</b>）。`
+    +`點「查看」切換；「繼續」可用不同 budget 單獨追加該 fold（看個別 fold 能否更好）。</div>`
     +`<table class="kv"><tr><th>fold</th><th>資料</th><th>GPU</th><th>狀態</th>`
-    +`<th>最佳 primary</th><th></th></tr>${rows}</table>`;
+    +`<th>trials</th><th>最佳 primary</th><th></th></tr>${rows}</table>`;
   let html=cell('🧩 逐 fold 平行總覽'+(pf.done?'（已全部完成）':'（執行中）'),
     folds.filter(e=>e.status==='finished').length+' / '+folds.length+' 完成', body, 'parent-overview');
   if(j.config) html+=cell('本次 run 設定 (config.yaml)','', '<pre style="max-height:240px">'+esc(j.config)+'</pre>', 'config');
-  if(j.report) html+=cell('彙整 report.md','', '<pre style="max-height:340px">'+esc(j.report)+'</pre>', 'report');
+  if(j.report) html+=cell('彙整 report.md','', j.report_html
+      ? '<div class="md-body" style="max-height:400px;overflow:auto">'+j.report_html+'</div>'
+      : '<pre style="max-height:340px">'+esc(j.report)+'</pre>', 'report');
   reconcile(nb, html); applyCellUI(nb);
 }
 async function pollRunStatus(){
@@ -632,6 +729,10 @@ async function pollRunStatus(){
   let html='';
   // 進度: 顯示在左側「決策討論」標題列中間 (不再單獨佔一格 notebook cell)
   renderChatProgress(j, cur);
+  // report cell 置頂 (方便查看; 渲染後的 markdown, 無 html 時退回純文字)
+  if(j.report) html+=cell('📄 report.md','', j.report_html
+      ? '<div class="md-body" style="max-height:420px;overflow:auto">'+j.report_html+'</div>'
+      : '<pre style="max-height:320px">'+esc(j.report)+'</pre>', 'report');
   // 設定 cell
   if(j.config) html+=cell('本次 run 設定 (config.yaml)','', '<pre style="max-height:240px">'+esc(j.config)+'</pre>', 'config');
   // 進行中 trial cell
@@ -645,8 +746,6 @@ async function pollRunStatus(){
   if(j.search_tree && Object.keys(j.search_tree).length)
     html+=cell('🌳 解答樹（AIDE 式搜尋：先開滿 draft → 每輪依指標機率選節點 improve/debug/resume）','', svgTreeAll(j.search_tree, cmap), 'tree');
   done.slice().reverse().forEach(t=>{ html+=cell('trial：'+t.trial_id, `<span class="pill ${t.status}">${t.status}</span>`, trialCard(t, cmap), 'trial:'+t.trial_id); });
-  // report cell
-  if(j.report) html+=cell('report.md','', '<pre style="max-height:300px">'+esc(j.report)+'</pre>', 'report');
   // LLM 完整提示詞與回應: 每次呼叫獨立成格 (key=ts) → 已展開的呼叫不會因輪詢/新呼叫而重載
   const calls=j.llm_calls||[];
   if(calls.length){

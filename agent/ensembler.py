@@ -43,28 +43,37 @@ class AlignError(Exception):
     """成員間 predictions 無法安全對齊 (樣本/類別不一致)。"""
 
 
-def _align(trials_dir: str, trial_ids: list[str], mode: str):
-    """把多個成員的 predictions 對齊到同一批樣本、同一類別欄位順序。
+def _read_df_at(task_dir: str, mode: str):
+    """讀某個 task_dir 的 predictions_{mode}.csv → (df, score_cols)。"""
+    import pandas as pd
+    path = os.path.join(task_dir, f"predictions_{mode}.csv")
+    if not os.path.isfile(path):
+        return None, None
+    df = pd.read_csv(path)
+    sc = [c for c in df.columns if c.endswith("_score")]
+    if "true_label" not in df.columns or not sc:
+        return None, None
+    return df, sc
 
-    回傳 (y_true, [prob_k ...])，prob_k 為 [N, C] ndarray；失敗時 raise AlignError。
+
+def _align_at(task_dirs: list, mode: str):
+    """把多個 task_dir 的 predictions 對齊 (跨 fold: 各成員在不同目錄, 同一批樣本)。
+
+    回傳 (y_true, [prob_k ...], base_cols)。以 image_path 交集對齊 (可驗證)。
     """
     import numpy as np
-
     dfs = []
-    for tid in trial_ids:
-        df, sc = _read_pred_df(trials_dir, tid, mode)
+    for td in task_dirs:
+        df, sc = _read_df_at(td, mode)
         if df is None:
-            raise AlignError(f"成員 {tid} 缺少可用的 predictions_{mode}.csv")
-        dfs.append((tid, df, sc))
-
-    base_cols = dfs[0][2]                       # 以第一個成員的類別欄位順序為準
-    for tid, df, sc in dfs:
+            raise AlignError(f"{td} 缺少可用的 predictions_{mode}.csv")
+        dfs.append((td, df, sc))
+    base_cols = dfs[0][2]
+    for td, df, sc in dfs:
         if set(sc) != set(base_cols):
-            raise AlignError(f"成員 {tid} 的類別欄位與基準不一致: {sorted(sc)}")
-
+            raise AlignError(f"{td} 的類別欄位與基準不一致")
     use_key = all("image_path" in df.columns for _, df, _ in dfs)
     if use_key:
-        # 以 image_path 交集 (保基準順序) 對齊 —— 樣本層級可驗證
         base_ids = list(dict.fromkeys(dfs[0][1]["image_path"].tolist()))
         common = set(base_ids)
         for _, df, _ in dfs[1:]:
@@ -73,23 +82,27 @@ def _align(trials_dir: str, trial_ids: list[str], mode: str):
         if not ids:
             raise AlignError("成員間 image_path 無交集, 無法對齊")
         aligned, y_true = [], None
-        for tid, df, _ in dfs:
+        for td, df, _ in dfs:
             d = df.drop_duplicates("image_path").set_index("image_path").loc[ids]
             aligned.append(d[base_cols].to_numpy(dtype=float))
             yt = d["true_label"].to_numpy()
             if y_true is None:
                 y_true = yt
             elif not np.array_equal(yt, y_true):
-                raise AlignError(f"成員 {tid} 對同一樣本的 true_label 與基準不符")
-        return np.asarray(y_true), aligned
-
-    # 無 image_path: 退回列順序對齊 (要求等長)
+                raise AlignError(f"{td} 對同一樣本的 true_label 與基準不符")
+        return np.asarray(y_true), aligned, base_cols
     n = len(dfs[0][1])
-    for tid, df, _ in dfs:
+    for td, df, _ in dfs:
         if len(df) != n:
-            raise AlignError(f"成員 {tid} 樣本數 {len(df)} 與基準 {n} 不符 (且無 image_path 可對齊)")
+            raise AlignError(f"{td} 樣本數與基準不符 (且無 image_path)")
     y_true = dfs[0][1]["true_label"].to_numpy()
     aligned = [df[base_cols].to_numpy(dtype=float) for _, df, _ in dfs]
+    return y_true, aligned, base_cols
+
+
+def _align(trials_dir: str, trial_ids: list[str], mode: str):
+    """同一 run 內多個成員 (trials_dir/trial_id) 對齊。回傳 (y_true, [prob_k ...])。"""
+    y_true, aligned, _ = _align_at([_task_dir(trials_dir, t) for t in trial_ids], mode)
     return y_true, aligned
 
 
@@ -320,3 +333,82 @@ def combine(members: list[TrialResult], spec: EnsembleSpec, cfg: EvalConfig,
         pred_path=pred_path, n_samples=int(len(y_true)), status="done",
         message=f"{n} 成員 · method={method_used}"
                 + (f" · weights={spec.weights}" if spec.weights else ""))
+
+
+# ---------------------------------------------------------------------------
+# 跨 fold 集成 (使用所有 fold 的模型, 在共同 test set 上找最佳組合)
+# ---------------------------------------------------------------------------
+def cross_fold_combine(members: list, cfg: EvalConfig, out_dir: str) -> EnsembleResult:
+    """用各 fold 的最佳模型在**共同 test set** 上組成集成, 以 greedy 前向選擇找最佳組合。
+
+    members: [{"label": "fold0:Dinov2", "task_dir": <foldN/trials/tid>, "ckpt": ..., "primary": ..}]
+    前提: 各 fold 共用同一 test set (predictions_test.csv 以 image_path 對齊)。
+    ⚠ 前向選擇是在共同 test 上做的 (k-fold 無另一個共同 held-out), 屬對 test 擇優,
+    分數為樂觀上界; 另附『全 fold 等權』分數 (無擇優) 供對照。失敗回 status='failed'。
+    """
+    import numpy as np
+    import pandas as pd
+
+    labels = [m["label"] for m in members]
+    task_dirs = [m["task_dir"] for m in members]
+
+    def _fail(msg):
+        return EnsembleResult(
+            ensemble_id="cross_fold",
+            spec=EnsembleSpec(member_trial_ids=labels, method="equal"),
+            status="failed", message=msg)
+
+    try:
+        y_true, probs, base_cols = _align_at(task_dirs, "test")
+    except Exception as e:                            # noqa: BLE001
+        return _fail(f"對齊失敗: {e}")
+
+    n = len(probs)
+    prim = lambda p: ev.compute_primary(_clf_metrics(y_true, p), cfg,
+                                        task_dir=None, mode="test")
+    ind = [prim(p) for p in probs]                    # 各 fold 模型在共同 test 的分數
+    order = sorted(range(n), key=lambda i: ind[i], reverse=True)
+
+    # greedy 前向選擇: 從最強的開始, 逐一嘗試加入能提升整體 primary 的模型
+    chosen = [order[0]]
+    best = ind[order[0]]
+    improved = True
+    while improved:
+        improved = False
+        for i in order:
+            if i in chosen:
+                continue
+            w = [1.0 / (len(chosen) + 1)] * (len(chosen) + 1)
+            s = prim(_weighted([probs[k] for k in chosen + [i]], w))
+            if s > best + 1e-9:
+                best, chosen, improved = s, chosen + [i], True
+
+    ens_prob = _weighted([probs[k] for k in chosen], [1.0 / len(chosen)] * len(chosen))
+    metrics = _clf_metrics(y_true, ens_prob)
+    all_prim = prim(_weighted(probs, [1.0 / n] * n))  # 全 fold 等權 (無擇優) 對照
+    best_single = max(ind)
+
+    os.makedirs(out_dir, exist_ok=True)
+    pred_df = pd.DataFrame(ens_prob, columns=base_cols)
+    pred_df["true_label"] = np.asarray(y_true).astype(int)
+    pred_df["pred_label"] = ens_prob.argmax(axis=1)
+    pred_path = os.path.join(out_dir, "predictions_test.csv")
+    pred_df.to_csv(pred_path, index=False, encoding="utf-8-sig")
+    for name in cfg.report_metrics:
+        real = ev._METRIC_ALIASES.get(name, name)
+        if real not in metrics and mreg.get(real) is not None:
+            v = ev._custom_metric(real, out_dir, "test")
+            if v is not None:
+                metrics[real] = v
+    primary = ev.compute_primary(metrics, cfg, task_dir=out_dir, mode="test")
+
+    spec = EnsembleSpec(
+        member_trial_ids=[labels[k] for k in chosen], method="equal",
+        rationale=(f"greedy 前向選擇（共同 test）；全 fold 等權={all_prim:.4f}；"
+                   f"最佳單一 fold 模型={best_single:.4f}"))
+    return EnsembleResult(
+        ensemble_id="cross_fold", spec=spec, metrics=metrics, primary_score=primary,
+        member_ckpts=[members[k].get("ckpt") for k in chosen if members[k].get("ckpt")],
+        pred_path=pred_path, n_samples=int(len(y_true)), status="done",
+        message=(f"從 {n} 個 fold 模型選出 {len(chosen)} 個；"
+                 f"全 fold 等權={all_prim:.4f}；最佳單一={best_single:.4f}"))

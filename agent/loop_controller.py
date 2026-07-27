@@ -1042,6 +1042,18 @@ class LoopController:
         self._run_ensemble_round(profile, history, "final")
         return self.ensemble
 
+    def _narrate_best(self, profile: DatasetProfile) -> str:
+        """報告用: 讓決策層 (LLM) 把最佳 recipe 寫成一段白話說明; 不支援時回空字串。"""
+        if self.best is None:
+            return ""
+        fn = getattr(self.advisor, "narrate_best", None)
+        if fn is None:
+            return ""
+        try:
+            return fn(profile, self.best) or ""
+        except Exception:                            # noqa: BLE001
+            return ""
+
     def _say(self, role: str, text: str, kind: str = "msg", **extra) -> None:
         conversation.append(self.run_dir, role, text, kind=kind, **extra)
 
@@ -1188,7 +1200,7 @@ class LoopController:
         report_path = report_mod.write_report(
             self.run_dir, profile, self.cfg, choices, per_encoder,
             self.best, dry_run=self.cfg.dry_run, fold_summary=fold_summary,
-            ensemble=self.ensemble)
+            ensemble=self.ensemble, best_narrative=self._narrate_best(profile))
 
         return {
             "profile": profile,

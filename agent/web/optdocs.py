@@ -52,6 +52,11 @@ def _load(path: str) -> dict:
     return docs
 
 
+def render(md_text: str) -> str:
+    """把任意 markdown 文字渲染成 HTML (供前端顯示 report.md 等)。"""
+    return _render(md_text or "")
+
+
 def load() -> dict:
     """工作台「新完整流程」表單各選項的說明 (docs/run_options.md)。"""
     return _load(os.path.join(_DOCS_DIR, "run_options.md"))

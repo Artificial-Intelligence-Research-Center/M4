@@ -604,6 +604,32 @@ class LLMAdvisor:
         return EnsembleSpec(member_trial_ids=real_ids, method=d.method,
                             rationale=d.rationale)
 
+    # ---- 報告用: 把最佳 recipe 的譜系寫成一段白話說明 --------------------
+    def narrate_best(self, profile: DatasetProfile, trial: TrialResult) -> str:
+        """用 2–3 句白話說明最佳 recipe 的組成與勝出原因 (供 report 顯示)。失敗回空。"""
+        try:
+            ctx = self._ctx(profile)
+            facts = redact.trial_facts(trial, ctx.alias).model_dump()
+            recipe = redact.scrub(trial.recipe.model_dump(), ctx.alias)
+            prompt = (
+                "以下是本次搜尋選出的最佳 trial（已假名化）。請用 2–3 句**白話中文**說明："
+                "這個 recipe 由哪個 encoder + 什麼 head／loss／regularizer／關鍵超參組成，"
+                "以及它為何是最佳（若有變異或超參調整，帶到原因）。只輸出這段說明，"
+                "不要列點、不要 JSON、不要提假名 ID。\n\n"
+                f"最佳 trial 事實：\n{json.dumps(facts, ensure_ascii=False, indent=2)}\n\n"
+                f"recipe：\n{json.dumps(recipe, ensure_ascii=False, indent=2)}")
+            client = self._get_client().with_options(timeout=120.0, max_retries=1)
+            resp = egress_mod.create(
+                client, ctx=ctx.egress, label="narrate_best", model=self.model,
+                system=[{"type": "text", "text": self._RULES}],
+                messages=[{"role": "user", "content": prompt}],
+                user_segments=(), max_tokens=800,
+                thinking={"type": "adaptive", "display": "summarized"})
+            return "".join(getattr(b, "text", "") for b in resp.content
+                           if getattr(b, "type", None) == "text").strip()
+        except Exception:
+            return ""
+
     # ---- 樹搜尋節點選擇的覆寫機會 (policy 選完 → 決策層過目) ----------
     def review_search_choice(self, profile: DatasetProfile, tree: list[dict],
                              proposal: dict,

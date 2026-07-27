@@ -650,6 +650,24 @@ def resume_run():
             JOBS[job_id]["status"] = "running"
         try:
             out = auto_finetune.run(cfg, run_dir=run_dir, resume=True)
+            # 若這是逐 fold 平行的子執行 (parent/foldN): 該 fold report 已更新,
+            # 這裡再重新彙整父層 (best/跨 fold 集成/父 report.md), 避免全域報告過時。
+            try:
+                parent_dir = os.path.dirname(run_dir)
+                fjp = os.path.join(parent_dir, "folds.json")
+                if os.path.isfile(fjp):
+                    with open(fjp, encoding="utf8") as fh:
+                        pj = json.load(fh)
+                    subs = {os.path.realpath(os.path.join(parent_dir, e.get("subdir", "")))
+                            for e in pj.get("folds", [])}
+                    if pj.get("mode") == "per_fold_parallel" and run_dir in subs:
+                        from ..fold_fleet import reaggregate_parent
+                        reaggregate_parent(parent_dir)
+                        convo.append(parent_dir, "system",
+                                     f"已重新彙整父層報告（{os.path.basename(run_dir)} 繼續後）。",
+                                     kind="status")
+            except Exception:
+                pass
             with _LOCK:
                 JOBS[job_id].update(
                     status="finished", n_trials=out["n_trials"],
@@ -661,6 +679,84 @@ def resume_run():
                                     trace=traceback.format_exc())
             try:
                 convo.append(run_dir, "system", f"繼續實驗失敗：{e}", kind="final")
+            except Exception:
+                pass
+
+    threading.Thread(target=_worker, args=(), daemon=True).start()
+    return jsonify({"ok": True, "run": run})
+
+
+@app.route("/resume_full", methods=["POST"])
+def resume_full():
+    """繼續一個『逐 fold 平行』run: 每個 fold 在既有樹後繼續 (跳過 draft),
+    依新的 max_trials/patience 追加步數, 最後重產彙整報告。"""
+    run = request.form.get("run", "").strip()
+    run_dir = os.path.realpath(os.path.join(_RUNS, run))
+    if not run or not run_dir.startswith(os.path.realpath(_RUNS) + os.sep) \
+            or not os.path.isdir(run_dir):
+        return jsonify({"ok": False, "error": "無效的 run"}), 400
+    fjp = os.path.join(run_dir, "folds.json")
+    try:
+        with open(fjp, encoding="utf8") as fh:
+            pj = json.load(fh)
+    except Exception:
+        pj = {}
+    if pj.get("mode") != "per_fold_parallel":
+        return jsonify({"ok": False, "error": "此 run 不是逐 fold 平行 run，請用一般「繼續」。"}), 400
+    with _LOCK:
+        busy = any(v.get("run") == run and v.get("status") in ("queued", "running")
+                   for v in JOBS.values())
+    if busy:
+        return jsonify({"ok": False, "error": "此 run 正在執行中。"}), 400
+    cfg_path = os.path.join(run_dir, "config.yaml")
+    try:
+        cfg = AgentConfig.load(cfg_path)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"config.yaml 載入失敗：{e}"}), 400
+    cfg.eval.aggregation = "per_fold"    # 確保走 fleet
+    cfg.stream_logs = False
+    if (mt := request.form.get("max_trials", "").strip()):
+        try:
+            cfg.loop.max_trials = int(mt)
+        except ValueError:
+            pass
+    if (pt := request.form.get("patience", "").strip()):
+        try:
+            cfg.loop.patience = int(pt)
+        except ValueError:
+            pass
+    # 清掉父與各 fold 子執行的中斷旗標, 讓它們能繼續
+    convo.clear_stop(run_dir)
+    for ent in pj.get("folds", []):
+        sub = os.path.join(run_dir, ent.get("subdir", ""))
+        if os.path.isdir(sub):
+            try:
+                convo.clear_stop(sub)
+            except Exception:
+                pass
+    convo.append(run_dir, "system",
+                 f"▶ 已排入繼續（max_trials={cfg.loop.max_trials}, "
+                 f"patience={cfg.loop.patience}）；各 fold 在既有樹後繼續，跳過 draft…",
+                 kind="status")
+    job_id = f"resumefull_{len(JOBS) + 1}"
+    JOBS[job_id] = {"status": "queued", "kind": "resume_full", "run": run,
+                    "run_dir": run_dir, "data_path": cfg.data_path}
+
+    def _worker():
+        with _LOCK:
+            JOBS[job_id]["status"] = "running"
+        try:
+            from ..fold_fleet import run_fleet
+            out = run_fleet(cfg, run_dir=run_dir, resume=True)
+            with _LOCK:
+                JOBS[job_id].update(status="finished", n_trials=out.get("n_trials"),
+                                    report=out.get("report_path"))
+        except Exception as e:
+            with _LOCK:
+                JOBS[job_id].update(status="failed", message=str(e),
+                                    trace=traceback.format_exc())
+            try:
+                convo.append(run_dir, "system", f"繼續失敗：{e}", kind="final")
             except Exception:
                 pass
 
@@ -695,10 +791,12 @@ def run_status():
         current["log_file"] = os.path.basename(lp)
 
     report = None
+    report_html = None
     rp = os.path.join(run_dir, "report.md")
     if os.path.isfile(rp):
         with open(rp, encoding="utf8") as fh:
             report = fh.read()
+        report_html = app_optdocs.render(report)   # 前端顯示渲染後的 markdown
 
     # 每個 trial: confusion matrix 圖 + 逐 epoch 曲線 (從各自的 log 抽)
     for t in trials:
@@ -842,7 +940,8 @@ def run_status():
     }
 
     return jsonify({"ok": True, "run": run, "trials": trials,
-                    "current": current, "report": report, "n_done": len(trials),
+                    "current": current, "report": report,
+                    "report_html": report_html, "n_done": len(trials),
                     "config": config_text, "running_trial": running_trial,
                     "conversation": convo.read(run_dir),
                     "stopped": convo.stop_requested(run_dir)[0],
