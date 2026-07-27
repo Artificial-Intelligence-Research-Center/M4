@@ -119,6 +119,11 @@ class FakeClient:
                 content = m.get("content")
                 if isinstance(content, str):
                     parts.append(content)
+                elif isinstance(content, list):
+                    # user message 會拆成多個 text block (快取前綴 + volatile),
+                    # 每一塊都要掃 — 否則 canary 測試會變成空掃描而假性通過。
+                    parts += [b.get("text", "") for b in content
+                              if isinstance(b, dict)]
             out.append("\n".join(parts))
         return out
 

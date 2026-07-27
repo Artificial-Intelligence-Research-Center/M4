@@ -201,6 +201,10 @@ class LLMAdvisor:
         self.analyzer_catalog: list[dict] = []
         # 本次決策附帶的資訊需求 (由呼叫端讀取後處理)
         self.last_info: InfoRequest = InfoRequest()
+        # 本 run 內的呼叫間隔統計 — 決定 cache TTL 用 5m 還是 1h (見 _next_cache_ttl)
+        self._last_call_ts: Optional[float] = None
+        self._gap_total = 0.0
+        self._gap_n = 0
 
     def _log_call(self, record: dict) -> None:
         if not self.log_path:
@@ -280,6 +284,78 @@ class LLMAdvisor:
                 + uf.model_dump_json(indent=2))
         return "\n\n".join(parts)
 
+    # prompt cache 的可快取前綴下限是 1024 tokens (claude-opus-4-8)。中文約
+    # 1 char≈1 token, 取 4000 字元當安全線 — 低於此值下 breakpoint 只會付
+    # cache write 的 2x 卻永遠讀不到。
+    _CACHE_MIN_CHARS = 4000
+
+    # 同一次請求裡的所有 breakpoint 必須用同一個 ttl: API 規定 render 順序
+    # (tools → system → messages) 上, ttl 長的 block 不得排在 ttl 短的之後,
+    # system 用 5m 而 messages 用 1h 會直接 400。
+    _CACHE_TTL_THRESHOLD_S = 240.0     # 平均呼叫間隔超過 4 分鐘才值得開 1h
+
+    def _next_cache_ttl(self) -> str:
+        """決定這次請求要用的 cache TTL, 並把本次呼叫時間記進統計。
+
+        1h 的 cache write 要 2x (5m 只要 1.25x), 只有在「下次呼叫時 5m 早就過期」
+        的情況下才划算。判斷依據是**本 run 內已觀察到的平均呼叫間隔**: 決策迴圈
+        的呼叫之間隔著一次完整訓練 (通常遠超過 5m) → 開 1h; 而 QA 連答、重試、
+        小資料集快速迭代這種密集呼叫 → 維持 5m, 不多付那 0.75x。
+
+        資料不足 (本 run 的第一次呼叫) 時保守用 5m。每次請求只呼叫一次 —
+        呼叫兩次會重複累加間隔。
+        """
+        now = time.time()
+        if self._last_call_ts is not None:
+            self._gap_total += now - self._last_call_ts
+            self._gap_n += 1
+        self._last_call_ts = now
+        avg = self._gap_total / self._gap_n if self._gap_n else 0.0
+        return "1h" if avg > self._CACHE_TTL_THRESHOLD_S else "5m"
+
+    _HIST_HEADER = "\n\n已完成 trials (由舊到新, 每行一筆 JSON; trial_id 為假名):\n"
+
+    def _data_block(self, profile: Optional[DatasetProfile],
+                    history: Optional[list[TrialResult]] = None) -> str:
+        """user message 的**穩定前綴**: DatasetFacts + 追加分析 + 使用者事實 + 已完成 trials。
+
+        這一段在一次 run 內是 append-only 的, 且所有 label (決策/QA) 都用完全相同
+        的位元組開頭 → 能共用同一筆 prompt cache。**任何隨輪次變動的東西**
+        (目前 encoder、本輪變異基準、解答樹、討論、本輪指令/schema) 一律要放在
+        這之後, 否則整段前綴會失效。
+
+        trials 刻意用 JSONL (每筆一行) 而不是 `json.dumps(list, indent=2)`:
+        cache 是**逐字前綴比對**, 陣列寫法每多一筆就會改寫收尾的 "}\\n]", 上一輪的
+        區塊就不再是這一輪的前綴, breakpoint 永遠 miss。逐行 append 才命中
+        (順帶省下 indent 的 token)。
+        """
+        txt = self._facts_block(profile)
+        if history:
+            txt += self._HIST_HEADER + "".join(
+                json.dumps(t, ensure_ascii=False) + "\n" for t in self._hist(history))
+        return txt
+
+    def _user_content(self, stable_text: str, volatile_text: str,
+                      ttl: str) -> list[dict]:
+        """把 user message 拆成 [穩定前綴 (下 cache breakpoint), 本輪 volatile] 兩塊。"""
+        if not stable_text:
+            return [{"type": "text", "text": volatile_text}]
+        head = {"type": "text", "text": stable_text}
+        if len(stable_text) >= self._CACHE_MIN_CHARS:
+            head["cache_control"] = {"type": "ephemeral", "ttl": ttl}
+        return [head, {"type": "text", "text": volatile_text}]
+
+    def _system(self, ttl: str) -> list[dict]:
+        """system: 決策規則 + 可用資源目錄 (跨 run 都不變) → 第一個 cache breakpoint。
+
+        ttl 必須與 user message 的 breakpoint 相同 — 見 _next_cache_ttl 的說明。
+        """
+        return [
+            {"type": "text", "text": self._RULES},
+            {"type": "text", "text": "可用資源目錄:\n" + self._registry_context(),
+             "cache_control": {"type": "ephemeral", "ttl": ttl}},
+        ]
+
     def _info_note(self, ctx: PrivacyContext) -> str:
         """告訴 LLM 兩條合法的補充資訊管道 (以及目前有哪些分析器可用)。"""
         cat = ""
@@ -335,9 +411,13 @@ class LLMAdvisor:
     # ---- 唯一出口 ------------------------------------------------------
     def _messages_parse(self, volatile_text: str, schema, retries: int = 3,
                         label: str = "", profile: Optional[DatasetProfile] = None,
-                        user_segments: tuple = ()):
+                        user_segments: tuple = (), stable_text: str = ""):
         """以 JSON 模式取得結構化決策 (刻意不用 messages.parse 的 grammar,
         因本環境 grammar 首次編譯常逾時且每次要等 ~60s; JSON 模式快且穩)。
+
+        `stable_text` 是 `_data_block()` 產生的穩定前綴, 會獨立成一個帶 cache_control
+        的 content block; `volatile_text` (本輪指令 + schema + 重試提示) 放在其後,
+        所以重試不會讓前綴失效。
 
         所有呼叫經 `privacy.egress` — payload 先過出口掃描, 命中即中止並落地稽核。
         """
@@ -346,11 +426,8 @@ class LLMAdvisor:
         if self.guidance:
             volatile_text = (f"【使用者引導方向 (請優先納入考量)】\n{self.guidance}\n\n"
                              + volatile_text)
-        system = [
-            {"type": "text", "text": self._RULES},
-            {"type": "text", "text": "可用資源目錄:\n" + self._registry_context(),
-             "cache_control": {"type": "ephemeral"}},  # 穩定→快取
-        ]
+        ttl = self._next_cache_ttl()     # 每次請求算一次; 重試沿用同一個值
+        system = self._system(ttl)
         system_text = "\n\n".join(b["text"] for b in system)
         sch = json.dumps(schema.model_json_schema(), ensure_ascii=False)
         base = (volatile_text + "\n\n請只輸出一個符合下列 JSON schema 的 JSON 物件, "
@@ -358,7 +435,9 @@ class LLMAdvisor:
         prompt, last = base, None
         for attempt in range(retries):
             rec = {"ts": time.time(), "label": label, "attempt": attempt,
-                   "model": self.model, "system": system_text, "prompt": prompt}
+                   "model": self.model, "system": system_text,
+                   "prompt": stable_text + prompt,
+                   "cached_prefix_chars": len(stable_text), "cache_ttl": ttl}
             try:
                 # 注意: adaptive thinking 的思考 token 也計入 max_tokens。4096 曾多次
                 # 被思考吃光導致正文空白或 JSON 截斷在字串中間 (pydantic EOF error),
@@ -366,7 +445,9 @@ class LLMAdvisor:
                 resp = egress_mod.create(
                     client, ctx=ctx.egress, label=label,
                     model=self.model, system=system,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user",
+                               "content": self._user_content(
+                                   stable_text, prompt, ttl)}],
                     user_segments=user_segments,
                     max_tokens=16000,
                     thinking={"type": "adaptive", "display": "summarized"})
@@ -434,8 +515,7 @@ class LLMAdvisor:
         """
         ctx = self._ctx(profile)
         d: _InfoPlan = self._messages_parse(
-            self._facts_block(profile)
-            + "\n\n實驗即將開始。在挑選 encoder 與組 Recipe 之前, 請判斷你還缺哪些"
+            "\n\n實驗即將開始。在挑選 encoder 與組 Recipe 之前, 請判斷你還缺哪些"
               "會**實質改變決策**的資料特性。\n"
               "- 能由本地程式算出來的 → 放進 request_analysis;\n"
               "- 只有使用者知道的 (影像模態、拍攝部位、類別是否有序、標註可信度、"
@@ -443,7 +523,8 @@ class LLMAdvisor:
               "- 都不缺就兩個都留空 (這是完全合理的答案)。\n"
               "問題請精簡, 一次最多 3 題, 且要能用選項回答。"
             + self._info_note(ctx),
-            _InfoPlan, label="plan_information", profile=profile)
+            _InfoPlan, label="plan_information", profile=profile,
+            stable_text=self._data_block(profile))
         info = self.last_info
         info.reason = d.reason or info.reason
         return info
@@ -453,10 +534,10 @@ class LLMAdvisor:
         n = 3
         ctx = self._ctx(profile)
         out: _EncoderSelection = self._messages_parse(
-            self._facts_block(profile)
-            + f"\n\n請從可用 encoder 中選最多 {n} 個作為比較 (依資料特性排序, 最合適在前)。"
+            f"\n\n請從可用 encoder 中選最多 {n} 個作為比較 (依資料特性排序, 最合適在前)。"
             + self._info_note(ctx),
-            _EncoderSelection, label="select_encoders", profile=profile)
+            _EncoderSelection, label="select_encoders", profile=profile,
+            stable_text=self._data_block(profile))
         avail = {c.model_key for c in reg.available_cards()}
         choices = [
             EncoderChoice(model_key=p.model_key, adaptation=p.adaptation,
@@ -473,8 +554,7 @@ class LLMAdvisor:
         start_hp = presets.get(preset).model_dump()
         ctx = self._ctx(profile)
         d: _RecipeDecision = self._messages_parse(
-            self._facts_block(profile)
-            + f"\n\n已選 encoder: {encoder.model_key} (adaptation={encoder.adaptation})。\n"
+            f"\n\n已選 encoder: {encoder.model_key} (adaptation={encoder.adaptation})。\n"
               f"起始超參數 (preset={preset}, 由使用者設定, 你可沿用或調整):\n"
               f"{json.dumps(start_hp, ensure_ascii=False)}\n\n"
               f"請為此 encoder 組出訓練 Recipe (選 head/pooling/loss/regularizer/augmentation)。"
@@ -483,7 +563,8 @@ class LLMAdvisor:
               f"任何超參數的改變都必須在 hparam_reason 逐項說明原因 (為何調整、依據什麼)；"
               f"不要無理由直接改動——沒有原因的調整將被忽略、沿用起始值。**"
             + self._info_note(ctx),
-            _RecipeDecision, label="compose_recipe", profile=profile)
+            _RecipeDecision, label="compose_recipe", profile=profile,
+            stable_text=self._data_block(profile))
         return self._build_recipe(profile, encoder, d)
 
     def _build_recipe(self, profile: DatasetProfile, encoder: EncoderChoice,
@@ -545,17 +626,15 @@ class LLMAdvisor:
     def propose_next(self, profile: DatasetProfile, encoder: EncoderChoice,
                      history: list[TrialResult],
                      base: Optional[TrialResult] = None) -> NextAction:
-        hist = self._hist(history)
         bt = self._pick_base(history, base)
         ctx = self._ctx(profile)
         d: _NextDecision = self._messages_parse(
-            self._facts_block(profile)
-            + f"\n\nencoder: {encoder.model_key}。已完成 trials (由舊到新):\n"
-              f"{json.dumps(hist, ensure_ascii=False, indent=2)}\n\n"
-              f"本輪的變異基準 (樹搜尋 policy 依指標機率選出): {self._base_id(bt)}。\n"
-              f"請決定: 對此基準 Recipe 做『一個』正交變異再試, 或停止。"
+            f"\n\nencoder: {encoder.model_key}。\n"
+            f"本輪的變異基準 (樹搜尋 policy 依指標機率選出): {self._base_id(bt)}。\n"
+            f"請決定: 對此基準 Recipe 做『一個』正交變異再試, 或停止。"
             + self._info_note(ctx),
-            _NextDecision, label="propose_next", profile=profile)
+            _NextDecision, label="propose_next", profile=profile,
+            stable_text=self._data_block(profile, history))
         next_recipe = None
         if not d.stop and bt is not None:
             next_recipe = self._apply_mutation(bt.recipe, d)
@@ -580,12 +659,8 @@ class LLMAdvisor:
         if len(done) < ensemble_cfg.min_members:
             return None
         ctx = self._ctx(profile)
-        hist = self._hist(history)                       # 假名化 TrialFacts
         d: _EnsemblePick = self._messages_parse(
-            self._facts_block(profile)
-            + f"\n\n已完成 trials (trial_id 為假名):\n"
-              f"{json.dumps(hist, ensure_ascii=False, indent=2)}\n\n"
-              f"請判斷是否值得把多個模型組成 ensemble (機率軟投票) 以提升下游效能。\n"
+            f"\n\n請判斷是否值得把多個模型組成 ensemble (機率軟投票) 以提升下游效能。\n"
               f"- 選 {ensemble_cfg.min_members}–{ensemble_cfg.max_members} 個**夠強且多樣**"
               f"的成員 (不同 encoder / 不同 domain 的預測較不相關, 集成增益更大; "
               f"明顯落後的弱模型會拖累, 不要納入)。\n"
@@ -594,7 +669,8 @@ class LLMAdvisor:
               f"- member_trial_ids 請填上面清單中的**假名 trial_id**; 只有 status=done 的可選。\n"
               f"- 若成員不足 2 個, 或彼此高度相似 (集成沒意義), do_ensemble=false。"
             + self._info_note(ctx),
-            _EnsemblePick, label="propose_ensemble", profile=profile)
+            _EnsemblePick, label="propose_ensemble", profile=profile,
+            stable_text=self._data_block(profile, history))
         if not d.do_ensemble:
             return None
         real_ids = redact.resolve_trial_ids(
@@ -647,8 +723,7 @@ class LLMAdvisor:
         proposal = redact.scrub(proposal, alias)
         try:
             d: _SearchChoice = self._messages_parse(
-                self._facts_block(profile)
-                + f"\n\n目前的解答樹 (每個節點的 allowed 欄位 = 這個節點現在允許的階段):\n"
+                f"\n\n目前的解答樹 (每個節點的 allowed 欄位 = 這個節點現在允許的階段):\n"
                   f"{json.dumps(tree, ensure_ascii=False, indent=2)}\n\n"
                   f"樹搜尋 policy 這一輪的選擇:\n"
                   f"{json.dumps(proposal, ensure_ascii=False, indent=2)}\n\n"
@@ -666,7 +741,7 @@ class LLMAdvisor:
                   f"做變異, 換不了節點也開不了 draft)。\n"
                   f"reason 請用一句話說明維持或改選的依據 (會顯示給使用者)。",
                 _SearchChoice, label="review_search_choice", profile=profile,
-                user_segments=segs)
+                user_segments=segs, stable_text=self._data_block(profile))
         except Exception:
             return SearchOverride(override=False)   # 失敗不阻斷迴圈, 沿用 policy
         return SearchOverride(
@@ -682,7 +757,6 @@ class LLMAdvisor:
                           workspace_dir: Optional[str] = None) -> NextAction:
         ctx = self._ctx(profile)
         alias = ctx.alias
-        hist = self._hist(history)
         bt = self._pick_base(history, base)
         # 只帶最近的討論以控 token; 保留 role/text (已做假名替換)
         talk = redact.discussion_facts(discussion, alias)
@@ -701,13 +775,13 @@ class LLMAdvisor:
             "(影像值、檔名、路徑) — 這類編輯會被拒絕。**" if can_edit else
             "(4) 本次不允許修改訓練程式 (mutation=edit_code 不可用)。")
         d: _ReviewDecision = self._messages_parse(
-            self._facts_block(profile)
-            + f"\n\n目前 encoder: {encoder.model_key}。已完成 trials (由舊到新):\n"
-              f"{json.dumps(hist, ensure_ascii=False, indent=2)}\n\n"
-              f"欄位說明: primary_score / metrics 是 **test set** 成績 (訓練結束後用 val "
+            # 注意順序: 隨輪次變動的東西 (目前 encoder、變異基準、討論) 一律放在
+            # stable_text (facts + trials) **之後**, 否則整段快取前綴會失效。
+            f"\n\n欄位說明: primary_score / metrics 是 **test set** 成績 (訓練結束後用 val "
               f"最佳 checkpoint 在 test 上重跑一次); train_loss_curve / val_loss_curve / "
               f"val_score_curve 則是訓練期間逐 epoch 的 train/val，長度 = 實際跑完的 epoch 數，"
               f"不含最終 test。兩者是不同 split，val 通常高於 test，落差本身不代表有問題。\n\n"
+              f"目前 encoder: {encoder.model_key}。\n"
               f"本輪的變異基準 (樹搜尋 policy 依指標機率選出, 不一定是全域最佳): "
               f"{self._base_id(bt)}。\n\n"
               f"與使用者的討論記錄 (由舊到新):\n"
@@ -724,7 +798,7 @@ class LLMAdvisor:
               f"矛盾, 本輪決策應優先採納最近的一則; "
             + edit_note + self._info_note(ctx),
             _ReviewDecision, label="review_and_decide", profile=profile,
-            user_segments=segs)
+            user_segments=segs, stable_text=self._data_block(profile, history))
         next_recipe = None
         if not d.stop and bt is not None:
             next_recipe = self._apply_mutation(
@@ -750,18 +824,17 @@ class LLMAdvisor:
         供決策層下一輪採用; 純知識性問題可無結論行。"""
         ctx = self._ctx(profile)
         alias = ctx.alias
-        hist = self._hist(history)
         talk = redact.discussion_facts(discussion, alias, limit=12)
         segs = tuple(redact.user_segments(discussion, alias, limit=12)) + (question,)
         tree_txt = (json.dumps(redact.scrub(tree, alias), ensure_ascii=False)
                     if tree else "（尚無解答樹）")
+        # 穩定前綴 (facts + trials) 與決策層逐字相同 → 共用同一筆 prompt cache;
+        # 角色說明與本輪問題一律放在其後。
+        stable = self._data_block(profile, history)
         volatile = (
-            f"你現在的角色是**實驗問答助理** (獨立於決策層): 使用者剛在討論頻道"
-            f"提出問題或方向, 請立即依下面的實驗資料回答, 不要做任何 Recipe 決策。\n\n"
-            + self._facts_block(profile)
-            + f"\n\n已完成 trials (由舊到新):\n"
-              f"{json.dumps(hist, ensure_ascii=False, indent=2)}\n\n"
-              f"解答樹 (AIDE 式搜尋; stage/parent/metric):\n{tree_txt}\n\n"
+            f"\n\n你現在的角色是**實驗問答助理** (獨立於決策層): 使用者剛在討論頻道"
+            f"提出問題或方向, 請立即依上面的實驗資料回答, 不要做任何 Recipe 決策。\n\n"
+            + f"解答樹 (AIDE 式搜尋; stage/parent/metric):\n{tree_txt}\n\n"
               f"近期討論 (由舊到新):\n{json.dumps(talk, ensure_ascii=False, indent=2)}\n\n"
               f"使用者剛提出：「{question}」\n\n"
               f"請直接以**純文字**回答使用者 (不要 JSON、不要 markdown 標題): "
@@ -776,17 +849,18 @@ class LLMAdvisor:
             volatile = (f"【使用者引導方向 (請優先納入考量)】\n{self.guidance}\n\n"
                         + volatile)
         client = self._get_client().with_options(timeout=240.0, max_retries=1)
-        system = [
-            {"type": "text", "text": self._RULES},
-            {"type": "text", "text": "可用資源目錄:\n" + self._registry_context(),
-             "cache_control": {"type": "ephemeral"}},  # 與決策層同前綴 → 命中快取
-        ]
+        ttl = self._next_cache_ttl()
+        system = self._system(ttl)       # 與決策層同前綴 → 命中同一筆快取
         rec = {"ts": time.time(), "label": "qa_answer", "model": self.model,
-               "system": "\n\n".join(b["text"] for b in system), "prompt": volatile}
+               "system": "\n\n".join(b["text"] for b in system),
+               "prompt": stable + volatile, "cached_prefix_chars": len(stable),
+               "cache_ttl": ttl}
         try:
             text, resp = egress_mod.stream_text(
                 client, ctx=ctx.egress, label="qa_answer", model=self.model,
-                system=system, messages=[{"role": "user", "content": volatile}],
+                system=system,
+                messages=[{"role": "user",
+                           "content": self._user_content(stable, volatile, ttl)}],
                 on_delta=on_delta, user_segments=segs,
                 max_tokens=16000,
                 thinking={"type": "adaptive", "display": "summarized"})
@@ -843,8 +917,7 @@ class LLMAdvisor:
             "本次不允許修改程式 (code_edits 會被忽略), 只能調整 Recipe/超參。")
         recipe_view = redact.scrub(trial.recipe.model_dump(), alias)
         d: _DebugDecision = self._messages_parse(
-            self._facts_block(profile)
-            + f"\n\nencoder: {encoder.model_key}。以下 trial 訓練失敗:\n"
+            f"\n\nencoder: {encoder.model_key}。以下 trial 訓練失敗:\n"
               f"Recipe:\n{json.dumps(recipe_view, ensure_ascii=False, indent=2)}\n\n"
               f"失敗事實 (ErrorFacts — 由本地程式從訓練 log 以允許清單抽取; "
               f"原始 log 含路徑與檔名, 依資料圍欄不提供給你):\n"
@@ -856,7 +929,8 @@ class LLMAdvisor:
               f"或 give_up=true; 不要臆測資料內容。"
               f"若判斷是資料或環境問題、重試無意義, 則 give_up=true。"
             + self._info_note(ctx),
-            _DebugDecision, label="propose_debug", profile=profile)
+            _DebugDecision, label="propose_debug", profile=profile,
+            stable_text=self._data_block(profile))
         if d.give_up:
             return None
 
