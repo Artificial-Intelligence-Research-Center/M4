@@ -1,0 +1,8 @@
+model: MAE
+model_arch: MAE
+weight: weights.pth
+embed_dim: 1024
+patch_size: 16
+input_size: 224
+domain: natural
+available: true

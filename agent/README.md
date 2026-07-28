@@ -51,7 +51,8 @@ schema 無自由字串 + mode 巨集）。
 | `schemas.py` | 資料契約 (§6)：`DatasetProfile / EncoderChoice / Recipe / TrialResult / NextAction / InfoRequest / EvalConfig`。⚠ `DatasetProfile` 屬資料平面，不得直接進 prompt |
 | `config.py` | `AgentConfig` — YAML 設定檔契約與載入 (§7) |
 | `dataset_analyzer.py` | §5.1 掃 ImageFolder → `DatasetProfile` |
-| `encoder_registry.py` | §5.3 encoder 目錄 (`EncoderCard`) |
+| `encoder_registry.py` | §5.3 encoder 目錄 — 掃描 `baseline_models/<model_key>/model.yaml` 產生 `EncoderCard`（[model_registry_design.md](../docs/model_registry_design.md)）；新增 model = 新增一個目錄，不改程式 |
+| `migrate_model_registry.py` | 一次性遷移：`baseline_models/*.pth` 平鋪 → `<model_key>/{model.yaml,weights.pth}` |
 | `component_registry.py` | §5.4 可組合元件目錄 + Recipe→CLI 映射 (head/loss/regularizer/aug) |
 | `advisor.py` | §5.2 `Advisor` 介面 + `HeuristicAdvisor`（規則式 + P4 變異階梯）+ `build_advisor` 工廠 |
 | `llm_advisor.py` | §5.2 `LLMAdvisor` — Claude API structured outputs 決策 |

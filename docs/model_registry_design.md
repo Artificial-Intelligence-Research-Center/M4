@@ -1,9 +1,9 @@
 # MedClaw 模型目錄 (Model Registry) — 設計文件
 
-- 狀態：v0.1 — **設計草案（尚未實作）**
+- 狀態：v0.2 — **載入層已實作**（§2–§5、§8、§9 已落地；§6 web UI 端點待做）
 - 適用範圍：`agent/` 自動微調 Agent（MedClaw）的 encoder 目錄管理
 - 相關文件：[auto_finetune_agent_design.md](auto_finetune_agent_design.md)、[data_firewall_design.md](data_firewall_design.md)
-- 相關程式：`agent/encoder_registry.py`、`agent/schemas.py`（`EncoderCard`）、`models_vit.py`、`main_finetune.py`、`agent/web/app.py`
+- 相關程式：`agent/encoder_registry.py`、`agent/migrate_model_registry.py`、`agent/schemas.py`（`EncoderCard`）、`tests/test_encoder_registry.py`、`models_vit.py`、`main_finetune.py`、`agent/web/app.py`
 
 ---
 
@@ -157,7 +157,7 @@ scan baseline_models/*/model.yaml
 3. **權重可達性**：`available: true` 且 `weight` 為本地檔時，檔案必須存在，否則 UI 標記為「權重缺失」、`available_cards()` 不回傳（與現行 `available_cards()` 的存在性檢查一致）。
 4. **唯一性**：`model_key`（＝目錄名）在 `baseline_models/` 下唯一。
 
-> 白名單應集中定義成一份常數（如 `models_vit.REGISTERED_FAMILIES` 或 `encoder_registry._ARCH_WHITELIST`），供 registry 驗證與 UI 表單下拉共用，避免兩處不同步。
+> 白名單集中定義成一份常數 `encoder_registry.ARCH_WHITELIST`，供 registry 驗證與 UI 表單下拉共用，避免兩處不同步。
 
 ---
 
@@ -190,16 +190,18 @@ UI 對 `baseline_models/` 的操作全部對應單純的檔案系統動作，因
 
 ## 8. 遷移計畫
 
-現有三檔轉為三個目錄（一次性 migration script）：
+現有三檔轉為三個目錄（一次性 migration script `python -m agent.migrate_model_registry`，加 `--dry-run` 可先看動作）：
 
 | 現況 | 遷移後 |
 | --- | --- |
 | `baseline_models/dinov2_vitl14_pretrain.pth` | `baseline_models/dinov2_vitl14/weights.pth` + `model.yaml` |
-| `baseline_models/mae_pretrain_vit_large.pth` | `baseline_models/mae_vit_large/weights.pth` + `model.yaml` |
+| `baseline_models/mae_pretrain_vit_large.pth` | `baseline_models/mae_pretrain_vit_large/weights.pth` + `model.yaml` |
 | `baseline_models/vit_large_patch16_224.pth` | `baseline_models/vit_large_patch16_224/weights.pth` + `model.yaml` |
 | `RETFound_dinov2_meh`（HF, `available:false`） | `baseline_models/RETFound_dinov2_meh/model.yaml`（僅 manifest） |
 
-各 `model.yaml` 的欄位直接取自現行 `_CARDS`（[encoder_registry.py](../agent/encoder_registry.py)）對應卡片。migration script 用 `os.rename`（同檔案系統零成本），不複製 1.2 GB。
+各 `model.yaml` 的欄位直接取自現行 `_BUILTIN_CARDS`（[encoder_registry.py](../agent/encoder_registry.py)）對應卡片。migration script 用 `os.rename`（同檔案系統零成本），不複製 1.2 GB；可重複執行（已有 `model.yaml` 的目錄會跳過）。
+
+> 目錄名一律沿用**原本的 `model_key`**（MAE 那張維持 `mae_pretrain_vit_large`，而非本文件 v0.1 草案寫的 `mae_vit_large`）。因為目錄名即 `model_key`，而 `model_key` 已寫進既有 `runs/` 歷史的 trial_id 與 `--encoder` 參數，改名會讓舊 run 的 `reg.get()` 直接 `KeyError`。
 
 ---
 
@@ -226,15 +228,15 @@ key_rename:                      # state_dict key 前綴替換
 
 ---
 
-## 11. 實作步驟（待辦）
+## 11. 實作步驟
 
-1. `EncoderCard` 加內部 `model_dir`（`exclude=True`）；`weight_path` 依 §3.2 解析。
-2. `encoder_registry`：新增目錄掃描載入 + `_BUILTIN_CARDS` fallback + `reload()`；保留現有對外函式簽章。
-3. 架構白名單集中為共用常數，供 registry 驗證與 UI 表單使用。
-4. migration script：三檔 → 三目錄（`os.rename` + 產生 `model.yaml`）。
-5. web 端點：list / view / create / edit / delete + 權重上傳（大檔策略見 §6）。
-6. 測試：載入／驗證／fallback／`available_cards` 存在性／重名 warning。
-7. 更新 [auto_finetune_agent_design.md](auto_finetune_agent_design.md) §5.3（EncoderRegistry）指向本文件。
+1. ✅ `EncoderCard` 加內部 `model_dir`（`exclude=True`）；`weight_path` 依 §3.2 解析。
+2. ✅ `encoder_registry`：新增目錄掃描載入 + `_BUILTIN_CARDS` fallback + `reload()`；保留現有對外函式簽章（另加 `warnings()` 供 UI 顯示載入問題）。
+3. ✅ 架構白名單集中為共用常數 `encoder_registry.ARCH_WHITELIST`，供 registry 驗證與 UI 表單使用。
+4. ✅ migration script：`agent/migrate_model_registry.py`（`os.rename` + 產生 `model.yaml`）。
+5. ⬜ web 端點：list / view / create / edit / delete + 權重上傳（大檔策略見 §6）。
+6. ✅ 測試：`tests/test_encoder_registry.py`（載入／驗證／fallback／`available_cards` 存在性／壞檔 fail-soft／`weight_path` 三種解析）。
+7. ⬜ 更新 [auto_finetune_agent_design.md](auto_finetune_agent_design.md) §5.3（EncoderRegistry）指向本文件。
 
 ---
 

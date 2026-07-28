@@ -145,7 +145,8 @@ def test_egress_blocks_and_audits_a_deliberate_leak():
         adv = LLMAdvisor(privacy=ctx)
         adv._client = FakeClient()
         # 模擬「有人繞過消毒, 把原始 profile 塞進 prompt」
-        adv._facts_block = lambda p: f"DatasetProfile: root={root}"
+        # (_facts_segments 回傳 prompt 的穩定段落; 這裡塞一段帶真實路徑的進去)
+        adv._facts_segments = lambda p: [f"DatasetProfile: root={root}"]
 
         try:
             adv.select_encoders(profile)

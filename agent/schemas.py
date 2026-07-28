@@ -40,16 +40,23 @@ class DatasetProfile(BaseModel):
 # Encoder 目錄
 # ---------------------------------------------------------------------------
 class EncoderCard(BaseModel):
-    model_key: str                    # registry key, 也用於 task_id
-    model: str                        # main_finetune --model
+    """一張 encoder 卡 = baseline_models/<model_key>/model.yaml 的內容。
+
+    見 docs/model_registry_design.md §3。model_key 省略時由目錄名補上。
+    """
+    model_key: str = ""               # registry key (= 目錄名), 也用於 task_id
+    model: str                        # main_finetune --model (架構家族)
     model_arch: str                   # main_finetune --model_arch
-    weight: str                       # --finetune 檔案路徑 (本地) 或 HF id
+    weight: str                       # 目錄內權重檔名 / 路徑 / HF id
     embed_dim: int = 1024
     patch_size: int = 16
     input_size: int = 224
     domain: Literal["natural", "medical_dap"] = "natural"
     available: bool = True            # 權重是否可在本機取得 (gated -> False)
     notes: str = ""
+    # 來源目錄 (由 registry 掃描時填入)。exclude=True → 不進 model_dump(),
+    # 因此不會混進送給 LLM 的 registry context, 也不會被寫回 model.yaml。
+    model_dir: str = Field(default="", exclude=True)
 
 
 class EncoderChoice(BaseModel):

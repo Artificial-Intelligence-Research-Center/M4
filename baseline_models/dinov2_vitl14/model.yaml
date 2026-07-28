@@ -1,0 +1,9 @@
+model: Dinov2
+model_arch: dinov2_vitl14
+weight: weights.pth
+embed_dim: 1024
+patch_size: 14
+input_size: 224
+domain: natural
+available: true
+notes: 實際權重由 timm pretrained=True 於執行時載入; 本地檔僅供探索。

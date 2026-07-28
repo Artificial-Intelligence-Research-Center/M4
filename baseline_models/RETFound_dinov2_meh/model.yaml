@@ -1,0 +1,9 @@
+model: RETFound_dinov2
+model_arch: retfound_dinov2
+weight: RETFound_dinov2_meh
+embed_dim: 1024
+patch_size: 14
+input_size: 224
+domain: medical_dap
+available: false
+notes: HF YukunZhou/* gated; 取得後 main_finetune 會自動下載。

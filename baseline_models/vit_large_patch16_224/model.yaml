@@ -1,0 +1,9 @@
+model: SL_VIT
+model_arch: SL_VIT
+weight: weights.pth
+embed_dim: 1024
+patch_size: 16
+input_size: 224
+domain: natural
+available: true
+notes: HF ViT 權重 key 與 timm ViT 不完全對齊, 可能載入不完整 (見 README 註記)。
