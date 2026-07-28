@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Literal, Optional
+from typing import Literal, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
@@ -193,7 +193,7 @@ class LLMAdvisor:
         self.guidance = guidance.strip()
         self.allow_code_edit = allow_code_edit  # 允許 LLM 修改程式 (副本, 見 code_workspace)
         self._client = None
-        self.log_path = None   # 設定後, 每次 LLM 呼叫的完整 prompt/回應會落地到此 (jsonl)
+        self._log_path: Optional[str] = None
         self.privacy = privacy
         # 已執行的分析器結果 (由 LoopController 填入, 隨 prompt 一起帶給 LLM)
         self.analyses: list[AnalysisFacts] = []
@@ -201,10 +201,46 @@ class LLMAdvisor:
         self.analyzer_catalog: list[dict] = []
         # 本次決策附帶的資訊需求 (由呼叫端讀取後處理)
         self.last_info: InfoRequest = InfoRequest()
-        # 本 run 內的呼叫間隔統計 — 決定 cache TTL 用 5m 還是 1h (見 _next_cache_ttl)
+        # 本 run 內觀察到的**最長**呼叫間隔 — 決定 cache TTL 用 5m 還是 1h
+        # (見 _next_cache_ttl)
         self._last_call_ts: Optional[float] = None
-        self._gap_total = 0.0
-        self._gap_n = 0
+        self._max_gap = 0.0
+
+    # ---- 呼叫紀錄落地; 設定路徑時順便接續上一段的 cache 間隔統計 ---------
+    @property
+    def log_path(self) -> Optional[str]:
+        """設定後, 每次 LLM 呼叫的完整 prompt/回應會落地到此 (jsonl)。"""
+        return self._log_path
+
+    @log_path.setter
+    def log_path(self, path: Optional[str]) -> None:
+        self._log_path = path
+        if path:
+            self._seed_gap_from_log(path)
+
+    def _seed_gap_from_log(self, path: str) -> None:
+        """resume 時從既有 llm_calls.jsonl 接續呼叫間隔統計。
+
+        中斷後 resume 會建立新的 LLMAdvisor, `_max_gap` 從 0 開始, 於是又要等到
+        第一次訓練空檔過完才知道該開 1h — 那一輪的 cache write 必然白付。既有
+        紀錄的 ts 就是上一段的呼叫節奏, 直接拿來接續, resume 後第一輪就選得對。
+
+        壞檔/缺欄位一律略過 (統計只是 ttl 的啟發式, 不值得為它擋住整個 run)。
+        """
+        ts: list[float] = []
+        try:
+            with open(path, encoding="utf8") as f:
+                for line in f:
+                    try:
+                        t = json.loads(line).get("ts")
+                    except (ValueError, AttributeError):
+                        continue
+                    if isinstance(t, (int, float)):
+                        ts.append(float(t))
+        except OSError:
+            return
+        for prev, cur in zip(ts, ts[1:]):
+            self._note_gap(cur - prev)
 
     def _log_call(self, record: dict) -> None:
         if not self.log_path:
@@ -256,94 +292,204 @@ class LLMAdvisor:
             self.privacy.note_user_text(self.guidance)
         return self.privacy
 
-    def _facts_block(self, profile: Optional[DatasetProfile]) -> str:
-        """prompt 的資料段: DatasetFacts + 分析器結果 + 使用者提供的事實。
+    _ANALYSES_HEADER = ("\n\n【追加分析結果】(你先前點名、由本地已註冊分析器執行後的"
+                        "輸出; 每行一筆 JSON)\n")
 
-        這是決策層唯一能看到的「資料」— 全部是本地程式產生的統計量或使用者自己填的。
+    def _facts_segments(self, profile: Optional[DatasetProfile]) -> list[str]:
+        """DatasetFacts + 分析器結果, 切成「寫出後就不再變」的段 (見 _data_block)。
+
+        這是決策層唯一能看到的「資料」— 全部是本地程式產生的統計量。
+        使用者事實見 _user_facts_block: 它會變, 所以排在 trials 之後。
         """
         ctx = self._ctx(profile)
-        parts = []
         if profile is not None:
-            parts.append(
-                "【資料集事實 DatasetFacts】(由本地程式分析後消毒; 你看不到也拿不到原始影像、"
-                "檔名或路徑。class_labels 是假名, 真實名稱不會提供)\n"
-                + ctx.facts(profile).model_dump_json(indent=2))
+            segs = ["【資料集事實 DatasetFacts】(由本地程式分析後消毒; 你看不到也拿不到"
+                    "原始影像、檔名或路徑。class_labels 是假名, 真實名稱不會提供)\n"
+                    + ctx.facts(profile).model_dump_json(indent=2)]
         else:
-            parts.append("【資料集事實】（尚無分析結果）")
+            segs = ["【資料集事實】（尚無分析結果）"]
         if self.analyses:
-            parts.append(
-                "【追加分析結果】(你先前點名、由本地已註冊分析器執行後的輸出)\n"
-                + json.dumps([a.model_dump() for a in self.analyses],
-                             ensure_ascii=False, indent=2))
+            # 依 key 排序 + 每筆自成一段。排序讓內容與「LLM 點名的順序」脫鉤
+            # (resume 後順序不保證相同); 分段則讓新增分析器時既有的段仍逐字不變
+            # —— 兩者都是 cache 命中的前提, 理由見 _data_block。
+            segs.append(self._ANALYSES_HEADER)
+            segs += [json.dumps(a.model_dump(), ensure_ascii=False) + "\n"
+                     for a in sorted(self.analyses, key=lambda x: x.key)]
+        return segs
+
+    def _user_facts_block(self, profile: Optional[DatasetProfile]) -> str:
+        """使用者在 UI 上填寫的事實; 沒有時回空字串。
+
+        內容會隨使用者回答問題而**改寫** (不是 append), 所以它是穩定前綴裡唯一
+        會變的一段 — 位置與 breakpoint 的安排見 _data_block。
+        """
+        ctx = self._ctx(profile)
         uf = ctx.refresh_user_facts()
         for a in uf.answers:
             ctx.note_user_text(a.value)   # 使用者自願提供 → 出口掃描只警示不中止
-        if _has_user_facts(uf):
-            parts.append(
-                "【使用者親自提供的事實】(使用者在 UI 上填寫; 可信度高於任何推測)\n"
+        if not _has_user_facts(uf):
+            return ""
+        # 開頭自帶分隔: content block 之間 API 不會補任何字元, 而分隔字元留在
+        # 本段開頭才不會動到前一段的結尾 (前一段必須維持逐字穩定)。
+        return ("\n\n【使用者親自提供的事實】(使用者在 UI 上填寫; 可信度高於任何推測)\n"
                 + uf.model_dump_json(indent=2))
-        return "\n\n".join(parts)
 
-    # prompt cache 的可快取前綴下限是 1024 tokens (claude-opus-4-8)。中文約
-    # 1 char≈1 token, 取 4000 字元當安全線 — 低於此值下 breakpoint 只會付
-    # cache write 的 2x 卻永遠讀不到。
-    _CACHE_MIN_CHARS = 4000
+    # prompt cache 的可快取前綴下限 (tokens) — **依模型不同, 且不隨世代單調遞減**。
+    # 低於下限即使下了 breakpoint 也只會付 cache write 卻永遠讀不到 (API 不報錯,
+    # 只是 cache_creation_input_tokens=0)。
+    _CACHE_MIN_TOKENS = {
+        "claude-opus-5": 512,
+        "claude-fable-5": 512,
+        "claude-mythos-5": 512,
+        "claude-opus-4-8": 1024,
+        "claude-sonnet-5": 1024,
+        "claude-sonnet-4-6": 1024,
+        "claude-sonnet-4-5": 1024,
+        "claude-opus-4-7": 2048,
+        "claude-opus-4-6": 4096,
+        "claude-opus-4-5": 4096,
+        "claude-haiku-4-5": 4096,
+    }
+    _CACHE_MIN_TOKENS_DEFAULT = 4096   # 不認得的模型取最保守值
+    # 換算 token → 字元。這段 prompt 是中文敘述混 ASCII 的 JSON: 中文約 1 char≈1
+    # token, 而 JSON 的 key/數字可到 1 token≈4 chars。取 4 是保守側 —— 寧可少下
+    # 一個 breakpoint, 也不要下了卻讀不到。
+    _CHARS_PER_TOKEN = 4
+
+    @property
+    def _cache_min_chars(self) -> int:
+        """本模型下值得下 breakpoint 的最短前綴 (字元)。"""
+        tok = next((v for k, v in self._CACHE_MIN_TOKENS.items()
+                    if self.model.startswith(k)), self._CACHE_MIN_TOKENS_DEFAULT)
+        return tok * self._CHARS_PER_TOKEN
 
     # 同一次請求裡的所有 breakpoint 必須用同一個 ttl: API 規定 render 順序
     # (tools → system → messages) 上, ttl 長的 block 不得排在 ttl 短的之後,
     # system 用 5m 而 messages 用 1h 會直接 400。
-    _CACHE_TTL_THRESHOLD_S = 240.0     # 平均呼叫間隔超過 4 分鐘才值得開 1h
+    _CACHE_TTL_THRESHOLD_S = 240.0     # 曾出現超過 4 分鐘的間隔才值得開 1h
+    # 超過 1h 的間隔連 1h cache 都活不過 → 不論選哪個 ttl 都必然 miss, 這時反而
+    # 該用比較便宜的 5m 寫入。所以這種間隔不列入「值得開 1h」的證據, 否則一次
+    # 隔夜中斷 (fold4 那次隔了 8 小時) 就會讓 resume 後每輪都多付 2x。
+    _CACHE_GAP_CEILING_S = 3600.0
+
+    def _note_gap(self, gap: float) -> None:
+        if 0.0 < gap <= self._CACHE_GAP_CEILING_S:
+            self._max_gap = max(self._max_gap, gap)
 
     def _next_cache_ttl(self) -> str:
         """決定這次請求要用的 cache TTL, 並把本次呼叫時間記進統計。
 
         1h 的 cache write 要 2x (5m 只要 1.25x), 只有在「下次呼叫時 5m 早就過期」
-        的情況下才划算。判斷依據是**本 run 內已觀察到的平均呼叫間隔**: 決策迴圈
-        的呼叫之間隔著一次完整訓練 (通常遠超過 5m) → 開 1h; 而 QA 連答、重試、
-        小資料集快速迭代這種密集呼叫 → 維持 5m, 不多付那 0.75x。
+        的情況下才划算。判斷依據是**本 run 內觀察到的最長呼叫間隔**: 只要曾經
+        出現過超過門檻的間隔, 就代表這個 run 的節奏會讓 5m entry 死在半路 ——
+        決策迴圈的兩次 review_and_decide 之間隔著一次完整訓練, 小資料集可能只要
+        3 分鐘 (5m 撐得住, 用 5m 省下那 0.75x), 大資料集動輒 10~20 分鐘 (5m 必死,
+        每輪都在付寫入費卻零命中, 改 1h 只要有第二次讀就回本)。
 
-        資料不足 (本 run 的第一次呼叫) 時保守用 5m。每次請求只呼叫一次 —
-        呼叫兩次會重複累加間隔。
+        **刻意用 max 而不是平均**: 平均會被連發的呼叫稀釋 —— 決策前的
+        plan_information → review_search_choice → review_and_decide 是 30 秒內連發,
+        再加上重試會連三發, 這些接近 0 的間隔會把平均壓到門檻以下, 結果訓練空檔
+        再長也永遠選 5m。一次長間隔就足以讓 entry 過期, 所以該看的是最大值。
+
+        全新 run 的第一次呼叫沒有間隔可看, 保守用 5m, 要到第一次長間隔之後才切到
+        1h — 那一輪的浪費無法避免 (事前不知道訓練要跑多久)。但 **resume 不必再付
+        一次**: 設定 log_path 時已從既有紀錄接續統計 (見 _seed_gap_from_log)。
+        每次請求只呼叫一次。
         """
         now = time.time()
         if self._last_call_ts is not None:
-            self._gap_total += now - self._last_call_ts
-            self._gap_n += 1
+            self._note_gap(now - self._last_call_ts)
         self._last_call_ts = now
-        avg = self._gap_total / self._gap_n if self._gap_n else 0.0
-        return "1h" if avg > self._CACHE_TTL_THRESHOLD_S else "5m"
+        return "1h" if self._max_gap > self._CACHE_TTL_THRESHOLD_S else "5m"
 
     _HIST_HEADER = "\n\n已完成 trials (由舊到新, 每行一筆 JSON; trial_id 為假名):\n"
 
     def _data_block(self, profile: Optional[DatasetProfile],
-                    history: Optional[list[TrialResult]] = None) -> str:
-        """user message 的**穩定前綴**: DatasetFacts + 追加分析 + 使用者事實 + 已完成 trials。
+                    history: Optional[list[TrialResult]] = None) -> list[str]:
+        """user message 的**穩定前綴**, 切成一串「寫出後就不再變動」的段。
 
-        這一段在一次 run 內是 append-only 的, 且所有 label (決策/QA) 都用完全相同
-        的位元組開頭 → 能共用同一筆 prompt cache。**任何隨輪次變動的東西**
-        (目前 encoder、本輪變異基準、解答樹、討論、本輪指令/schema) 一律要放在
-        這之後, 否則整段前綴會失效。
+        每一段各成一個 content block, 段的切法就是 cache 的命脈:
 
-        trials 刻意用 JSONL (每筆一行) 而不是 `json.dumps(list, indent=2)`:
-        cache 是**逐字前綴比對**, 陣列寫法每多一筆就會改寫收尾的 "}\\n]", 上一輪的
-        區塊就不再是這一輪的前綴, breakpoint 永遠 miss。逐行 append 才命中
+          [0]   DatasetFacts                      — 一個 run 內固定
+          [1..] 追加分析標頭 + 每個分析器一段      — 只會 append
+          [k]   trials 標頭 + **每個 trial 一段**  — 只會 append
+          [-1]  使用者親自提供的事實               — 會**改寫**, 所以排最後
+
+        **關鍵: 快取比對是以 content block 邊界為單位, 不是任意位元組前綴。**
+        早期版本把整段 trials 塞在一個會長大的 block 裡, 內容確實是乾淨的
+        append-only 前綴鏈, 但上一輪的斷點 (例: 66,512 字元處) 在這一輪落到那個
+        block (74,325 字元) 的**中間** —— 沒有邊界可對, 於是幾萬 token 每輪重寫
+        卻一次都沒讀到。實測佐證: 同一批位元組放在固定不變的 block 裡 (system、
+        不帶 history 的小呼叫) 每次都命中, 只有會長大的那塊從來沒中過。
+
+        所以每個 trial 各自成段: 下一輪多一筆時, 前面所有段仍**逐字相同且邊界
+        不變**, 上一輪在最後一段結尾寫下的 entry 這一輪還找得到 (breakpoint 只
+        往回找 20 個 block, 而每輪只多 1 段)。這就是官方多輪對話的作法。
+
+        使用者事實排最後同理: 它會改寫, 放前面的話使用者一回答問題就把後面那
+        50k+ 的 trials 全部推掉。
+
+        所有 label (決策/QA) 都用完全相同的段開頭 → 共用同一筆 cache。
+        **任何隨輪次變動的東西** (目前 encoder、本輪變異基準、解答樹、討論、
+        本輪指令/schema) 一律放在這之後, 否則整段前綴會失效。
+
+        trials 用 JSONL (每筆一行) 而不是 `json.dumps(list, indent=2)`: 陣列寫法
+        每多一筆就會改寫上一筆收尾的 "}\\n" → "},\\n", 連內容都不是前綴了
         (順帶省下 indent 的 token)。
         """
-        txt = self._facts_block(profile)
+        segs = self._facts_segments(profile)
         if history:
-            txt += self._HIST_HEADER + "".join(
-                json.dumps(t, ensure_ascii=False) + "\n" for t in self._hist(history))
-        return txt
+            segs.append(self._HIST_HEADER)
+            segs += [json.dumps(t, ensure_ascii=False) + "\n"
+                     for t in self._hist(history)]
+        return [s for s in segs + [self._user_facts_block(profile)] if s]
 
-    def _user_content(self, stable_text: str, volatile_text: str,
+    # 一次請求最多 4 個 breakpoint; system 佔掉 1, 其餘留給 user message。
+    _MAX_USER_BREAKPOINTS = 3
+
+    def _breakpoint_indices(self, stable: Sequence[str]) -> list[int]:
+        """哪幾段要下 cache_control。
+
+        額度有限 (最多 3), 所以只下在**最後**幾段: 這一輪的最後一段是下一輪的
+        讀取點, 而倒數第二、三段是上一輪/上上輪寫下的 entry —— 保留它們等於多留
+        兩個退路, 中間漏掉一輪 (例如某次呼叫失敗) 也還接得回去。
+
+        門檻用**累計**長度而非單段長度: cache 的最小前綴是從 prompt 開頭算起的,
+        所以接在 50k 之後的一小段照樣值得下 breakpoint。
+        """
+        eligible, total = [], 0
+        for i, seg in enumerate(stable):
+            total += len(seg)
+            if total >= self._cache_min_chars:
+                eligible.append(i)
+        return eligible[-self._MAX_USER_BREAKPOINTS:]
+
+    def _cache_log_fields(self, stable: Sequence[str]) -> dict:
+        """落地用: 段數、總長、各 breakpoint 的累計位移 (供事後比對命中率)。"""
+        marked = set(self._breakpoint_indices(stable))
+        offsets, total = [], 0
+        for i, seg in enumerate(stable):
+            total += len(seg)
+            if i in marked:
+                offsets.append(total)
+        return {"cached_prefix_chars": total, "cache_segments": len(stable),
+                "cache_breakpoints": offsets}
+
+    def _user_content(self, stable: Sequence[str], volatile_text: str,
                       ttl: str) -> list[dict]:
-        """把 user message 拆成 [穩定前綴 (下 cache breakpoint), 本輪 volatile] 兩塊。"""
-        if not stable_text:
-            return [{"type": "text", "text": volatile_text}]
-        head = {"type": "text", "text": stable_text}
-        if len(stable_text) >= self._CACHE_MIN_CHARS:
-            head["cache_control"] = {"type": "ephemeral", "ttl": ttl}
-        return [head, {"type": "text", "text": volatile_text}]
+        """把 user message 拆成 [穩定段 × N, 本輪 volatile] 的 content blocks。
+
+        一段一個 block 是刻意的 —— 快取比對以 block 邊界為單位, 段的切法見
+        _data_block。breakpoint 只下在 _breakpoint_indices() 選出的那幾段。
+        """
+        marked = set(self._breakpoint_indices(stable))
+        blocks: list[dict] = []
+        for i, seg in enumerate(stable):
+            b = {"type": "text", "text": seg}
+            if i in marked:
+                b["cache_control"] = {"type": "ephemeral", "ttl": ttl}
+            blocks.append(b)
+        return blocks + [{"type": "text", "text": volatile_text}]
 
     def _system(self, ttl: str) -> list[dict]:
         """system: 決策規則 + 可用資源目錄 (跨 run 都不變) → 第一個 cache breakpoint。
@@ -411,11 +557,11 @@ class LLMAdvisor:
     # ---- 唯一出口 ------------------------------------------------------
     def _messages_parse(self, volatile_text: str, schema, retries: int = 3,
                         label: str = "", profile: Optional[DatasetProfile] = None,
-                        user_segments: tuple = (), stable_text: str = ""):
+                        user_segments: tuple = (), stable: Sequence[str] = ()):
         """以 JSON 模式取得結構化決策 (刻意不用 messages.parse 的 grammar,
         因本環境 grammar 首次編譯常逾時且每次要等 ~60s; JSON 模式快且穩)。
 
-        `stable_text` 是 `_data_block()` 產生的穩定前綴, 會獨立成一個帶 cache_control
+        `stable` 是 `_data_block()` 產生的穩定前綴段落, 每段各成一個帶 cache_control
         的 content block; `volatile_text` (本輪指令 + schema + 重試提示) 放在其後,
         所以重試不會讓前綴失效。
 
@@ -436,8 +582,8 @@ class LLMAdvisor:
         for attempt in range(retries):
             rec = {"ts": time.time(), "label": label, "attempt": attempt,
                    "model": self.model, "system": system_text,
-                   "prompt": stable_text + prompt,
-                   "cached_prefix_chars": len(stable_text), "cache_ttl": ttl}
+                   "prompt": "".join(stable) + prompt, "cache_ttl": ttl,
+                   **self._cache_log_fields(stable)}
             try:
                 # 注意: adaptive thinking 的思考 token 也計入 max_tokens。4096 曾多次
                 # 被思考吃光導致正文空白或 JSON 截斷在字串中間 (pydantic EOF error),
@@ -447,7 +593,7 @@ class LLMAdvisor:
                     model=self.model, system=system,
                     messages=[{"role": "user",
                                "content": self._user_content(
-                                   stable_text, prompt, ttl)}],
+                                   list(stable), prompt, ttl)}],
                     user_segments=user_segments,
                     max_tokens=16000,
                     thinking={"type": "adaptive", "display": "summarized"})
@@ -524,7 +670,7 @@ class LLMAdvisor:
               "問題請精簡, 一次最多 3 題, 且要能用選項回答。"
             + self._info_note(ctx),
             _InfoPlan, label="plan_information", profile=profile,
-            stable_text=self._data_block(profile))
+            stable=self._data_block(profile))
         info = self.last_info
         info.reason = d.reason or info.reason
         return info
@@ -537,7 +683,7 @@ class LLMAdvisor:
             f"\n\n請從可用 encoder 中選最多 {n} 個作為比較 (依資料特性排序, 最合適在前)。"
             + self._info_note(ctx),
             _EncoderSelection, label="select_encoders", profile=profile,
-            stable_text=self._data_block(profile))
+            stable=self._data_block(profile))
         avail = {c.model_key for c in reg.available_cards()}
         choices = [
             EncoderChoice(model_key=p.model_key, adaptation=p.adaptation,
@@ -564,7 +710,7 @@ class LLMAdvisor:
               f"不要無理由直接改動——沒有原因的調整將被忽略、沿用起始值。**"
             + self._info_note(ctx),
             _RecipeDecision, label="compose_recipe", profile=profile,
-            stable_text=self._data_block(profile))
+            stable=self._data_block(profile))
         return self._build_recipe(profile, encoder, d)
 
     def _build_recipe(self, profile: DatasetProfile, encoder: EncoderChoice,
@@ -634,7 +780,7 @@ class LLMAdvisor:
             f"請決定: 對此基準 Recipe 做『一個』正交變異再試, 或停止。"
             + self._info_note(ctx),
             _NextDecision, label="propose_next", profile=profile,
-            stable_text=self._data_block(profile, history))
+            stable=self._data_block(profile, history))
         next_recipe = None
         if not d.stop and bt is not None:
             next_recipe = self._apply_mutation(bt.recipe, d)
@@ -670,7 +816,7 @@ class LLMAdvisor:
               f"- 若成員不足 2 個, 或彼此高度相似 (集成沒意義), do_ensemble=false。"
             + self._info_note(ctx),
             _EnsemblePick, label="propose_ensemble", profile=profile,
-            stable_text=self._data_block(profile, history))
+            stable=self._data_block(profile, history))
         if not d.do_ensemble:
             return None
         real_ids = redact.resolve_trial_ids(
@@ -741,7 +887,7 @@ class LLMAdvisor:
                   f"做變異, 換不了節點也開不了 draft)。\n"
                   f"reason 請用一句話說明維持或改選的依據 (會顯示給使用者)。",
                 _SearchChoice, label="review_search_choice", profile=profile,
-                user_segments=segs, stable_text=self._data_block(profile))
+                user_segments=segs, stable=self._data_block(profile))
         except Exception:
             return SearchOverride(override=False)   # 失敗不阻斷迴圈, 沿用 policy
         return SearchOverride(
@@ -776,7 +922,7 @@ class LLMAdvisor:
             "(4) 本次不允許修改訓練程式 (mutation=edit_code 不可用)。")
         d: _ReviewDecision = self._messages_parse(
             # 注意順序: 隨輪次變動的東西 (目前 encoder、變異基準、討論) 一律放在
-            # stable_text (facts + trials) **之後**, 否則整段快取前綴會失效。
+            # stable (facts + trials + 使用者事實) **之後**, 否則整段快取前綴會失效。
             f"\n\n欄位說明: primary_score / metrics 是 **test set** 成績 (訓練結束後用 val "
               f"最佳 checkpoint 在 test 上重跑一次); train_loss_curve / val_loss_curve / "
               f"val_score_curve 則是訓練期間逐 epoch 的 train/val，長度 = 實際跑完的 epoch 數，"
@@ -798,7 +944,7 @@ class LLMAdvisor:
               f"矛盾, 本輪決策應優先採納最近的一則; "
             + edit_note + self._info_note(ctx),
             _ReviewDecision, label="review_and_decide", profile=profile,
-            user_segments=segs, stable_text=self._data_block(profile, history))
+            user_segments=segs, stable=self._data_block(profile, history))
         next_recipe = None
         if not d.stop and bt is not None:
             next_recipe = self._apply_mutation(
@@ -853,8 +999,8 @@ class LLMAdvisor:
         system = self._system(ttl)       # 與決策層同前綴 → 命中同一筆快取
         rec = {"ts": time.time(), "label": "qa_answer", "model": self.model,
                "system": "\n\n".join(b["text"] for b in system),
-               "prompt": stable + volatile, "cached_prefix_chars": len(stable),
-               "cache_ttl": ttl}
+               "prompt": "".join(stable) + volatile, "cache_ttl": ttl,
+               **self._cache_log_fields(stable)}
         try:
             text, resp = egress_mod.stream_text(
                 client, ctx=ctx.egress, label="qa_answer", model=self.model,
@@ -930,7 +1076,7 @@ class LLMAdvisor:
               f"若判斷是資料或環境問題、重試無意義, 則 give_up=true。"
             + self._info_note(ctx),
             _DebugDecision, label="propose_debug", profile=profile,
-            stable_text=self._data_block(profile))
+            stable=self._data_block(profile))
         if d.give_up:
             return None
 
