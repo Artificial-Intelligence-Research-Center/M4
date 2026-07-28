@@ -136,7 +136,9 @@ class Advisor(Protocol):
 
 #### 與 Claude API 整合（僅 Advisor 這一層依賴 LLM）
 
-依 `claude-api` 參考：官方 `anthropic` SDK + `messages.parse()`（structured outputs）；模型 `claude-opus-4-8`；`thinking={"type":"adaptive"}`。每個決策方法綁一個 Pydantic schema，輸出即驗證。穩定內容（registry 目錄、TaskTemplate、規則）放前面加 `cache_control`；volatile（本次 profile、history）放後面以命中 prompt cache。LLM 只吐「決策」，實體建構由 `RecipeBuilder`（純程式）完成，避免 LLM 直接產碼。
+依 `claude-api` 參考：官方 `anthropic` SDK + `messages.parse()`（structured outputs）；模型 `claude-opus-4-8`；`thinking={"type":"adaptive"}`。每個決策方法綁一個 Pydantic schema，輸出即驗證。LLM 只吐「決策」，實體建構由 `RecipeBuilder`（純程式）完成，避免 LLM 直接產碼。
+
+prompt 的分段與 prompt cache 佈局見 [prompt_structure_design.md](prompt_structure_design.md)：穩定內容（規則、registry 目錄、資料集事實、分析結果、**已完成 trials**）切成一串「寫出後就不再變動」的 content block 並加 `cache_control`，隨輪次變動的東西（本輪指令、schema、解答樹、討論）放最後。⚠ 快取比對以 **content block 邊界**為單位，不是任意位元組前綴——把會增長的內容併成單一 block 會讓快取完全失效（該文件 §3.1）。
 
 ### 5.3 EncoderRegistry
 

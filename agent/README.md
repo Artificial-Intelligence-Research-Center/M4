@@ -55,7 +55,7 @@ schema 無自由字串 + mode 巨集）。
 | `migrate_model_registry.py` | 一次性遷移：`baseline_models/*.pth` 平鋪 → `<model_key>/{model.yaml,weights.pth}` |
 | `component_registry.py` | §5.4 可組合元件目錄 + Recipe→CLI 映射 (head/loss/regularizer/aug) |
 | `advisor.py` | §5.2 `Advisor` 介面 + `HeuristicAdvisor`（規則式 + P4 變異階梯）+ `build_advisor` 工廠 |
-| `llm_advisor.py` | §5.2 `LLMAdvisor` — Claude API structured outputs 決策 |
+| `llm_advisor.py` | §5.2 `LLMAdvisor` — Claude API structured outputs 決策；prompt 分段與 cache 佈局見 [prompt_structure_design.md](../docs/prompt_structure_design.md) |
 | `recipe_builder.py` | §5.4 `Recipe` → `main_finetune.py` 指令（經 ComponentRegistry） |
 | `trainer.py` | §5.5 subprocess 包裝 + GPU 可用性判斷（實際配置 CUDA） |
 | `evaluator.py` | §5.6 讀 metrics/predictions；EvalConfig 選優 + 自訂 metric |
