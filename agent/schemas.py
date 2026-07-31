@@ -195,7 +195,12 @@ class InfoRequest(BaseModel):
 
 
 class NextAction(BaseModel):
+    # ⚠ stop 與 prune_branch 語意不同, 別混用 (見 loop_controller 的 improve 分支):
+    #   stop         = 結束整個 fold 的搜尋 (已收斂 / 使用者要求 / 不值得再跑)
+    #   prune_branch = 只放棄「本輪的變異基準節點」, 搜尋改從別的節點繼續
+    # 歷史 bug: 決策層想表達後者卻只有 stop 可用, 導致整場實驗提早收工。
     stop: bool
+    prune_branch: bool = False
     reason: str = ""
     narrative: str = ""  # LLM 對目前結果的簡短檢視說明 (給使用者看的對話內容)
     mutation: Literal[

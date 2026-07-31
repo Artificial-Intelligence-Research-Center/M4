@@ -245,6 +245,7 @@ worker pool。修正（實測資料管線穩態 **9.3× 加速**）：
 
 - **`HeuristicAdvisor`**（預設、離線退路）：規則式選 encoder / 組 Recipe；P4 變異階梯（mixup → mlp head → label_smoothing…），一次一個正交變異，記錄 provenance。
 - **`LLMAdvisor`**（P2）：Claude API `messages.parse()` structured outputs，模型 `claude-opus-4-8`，adaptive thinking，穩定目錄加 `cache_control`。LLM 只吐決策，Recipe 由純程式建構。**需 `pip install anthropic` + 金鑰**（`ANTHROPIC_API_KEY` 或 `ant auth login`）；不可用時各方法退回 `HeuristicAdvisor`。
+  - **端點可切換**：設 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` 即改走 Anthropic-compatible 的代理端點（例：OpenRouter 的 `https://openrouter.ai/api`，模型 id 以 `MEDCLAW_LLM_MODEL=anthropic/claude-opus-4.8` 指定），兩者皆未設則走官方端點（行為不變）。範例見 `.env`。實測經 OpenRouter 時 adaptive thinking 與 prompt cache（含 1h ttl、cache read 命中）都與直連相同；但快取是**各 provider 各自持有**，故預設以 `provider={"only":["anthropic"]}` 釘住 first-party（`MEDCLAW_LLM_PROVIDER=off` 可解除）。每次呼叫的 `usage`（含 `cache_read_input_tokens`）會落地到 `llm_calls.jsonl` 供事後核對命中率。⚠ 指到代理端點等於把（已消毒的）payload 交給第三方轉送 — 見 `docs/data_firewall_design.md` §7.5。
 - **`SkillAdvisor`**（P7）：以 file-based handoff 委派給 `finetune-advisor` skill（寫 `req_*.json`、讀 `resp_*.json`）；介面與其他兩者相同，故決策層可整組抽換（`advisor.type=skill`）。resp 未就緒時退回 `fallback`（預設 Heuristic），讓迴圈仍可推進。未來把 `_invoke_skill` 接上實際 Claude Code skill 呼叫即可。
 
 ### GPU 利用率最佳化（`gpu.*`，預設開啟）

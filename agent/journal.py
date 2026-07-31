@@ -24,6 +24,7 @@ class Node:
         self.stage: Stage = stage
         self.trial: Optional[TrialResult] = None   # 執行後回填
         self.debug_exhausted = False               # 無法再產生除錯配方 → policy 不再選它
+        self.improve_exhausted = False             # 決策層判定此分支再變異無益 → policy 不再選它
         if parent is not None:
             parent.children.append(self)
 
@@ -93,6 +94,11 @@ class Journal:
     def good_nodes(self) -> list[Node]:
         return [n for n in self.nodes if n.evaluated and n.trial.status == "done"]
 
+    @property
+    def improvable_nodes(self) -> list[Node]:
+        """還能當 improve 起點的成功節點 (排除決策層已放棄的分支)。"""
+        return [n for n in self.good_nodes if not n.improve_exhausted]
+
     def get_best_node(self) -> Optional[Node]:
         good = self.good_nodes
         return max(good, key=lambda n: n.metric) if good else None
@@ -104,7 +110,8 @@ class Journal:
 
         每個 trial 的 recipe.provenance.search 記錄了 {stage, parent(=trial_id)},
         依執行順序重建節點與父子連結; 缺 search 資訊的舊 trial 一律視為 draft。
-        (debug_exhausted 不落地, 重建後遺失 — 影響僅是 Advisor 可能再試一次除錯。)"""
+        (debug_exhausted / improve_exhausted 不落地, 重建後遺失 — 影響僅是
+        Advisor 可能再試一次除錯或再看一次已放棄的分支。)"""
         j = Journal()
         by_id: dict[str, Node] = {}
         for t in trials:
@@ -135,6 +142,8 @@ class Journal:
                 "children": [idx[id(c)] for c in n.children],
                 "metric": n.metric,
                 "is_buggy": n.is_buggy,
+                # 決策層判定這條分支再變異無益 → 之後不再從它長 child
+                "pruned": n.improve_exhausted,
                 "debug_depth": n.debug_depth,
                 "resume_depth": n.resume_depth,
                 "select_prob": n.recipe.provenance.get("search", {}).get("select_prob"),

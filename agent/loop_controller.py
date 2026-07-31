@@ -343,11 +343,14 @@ class LoopController:
     def _select_improve_node(self, journal: Journal) -> tuple[Node, float]:
         """依指標機率選要改善的節點: 對所有成功節點的 primary 分數做 softmax
         加權抽樣 (improve_temperature 控制; <=0 = greedy 只選最佳)。
-        回傳 (節點, 被選中的機率) — 機率會顯示給使用者。"""
-        good = journal.good_nodes
+        回傳 (節點, 被選中的機率) — 機率會顯示給使用者。
+        決策層已 prune 的分支 (improve_exhausted) 不再入選; 全被 prune 時回 (None, 1.0)。"""
+        good = journal.improvable_nodes
+        if not good:
+            return None, 1.0
         T = self.cfg.loop.improve_temperature
         if T <= 0 or len(good) == 1:
-            return journal.get_best_node(), 1.0
+            return max(good, key=lambda n: n.metric), 1.0
         mx = max(n.metric for n in good)
         ws = [math.exp((n.metric - mx) / T) for n in good]
         tot = sum(ws)
@@ -364,7 +367,7 @@ class LoopController:
         Agent.search_policy, 但 improve 改為依指標機率抽樣 (使用者可看到機率):
         1. draft 不足 num_drafts → 繼續 draft;
         2. 以 debug_prob 機率挑失敗 leaf 除錯;
-        3. 依 primary 分數 softmax 抽一個成功節點改善; 無成功節點 → 回頭 draft。"""
+        3. 依 primary 分數 softmax 抽一個成功節點改善; 無可改善節點 → 回頭 draft。"""
         scfg = self.cfg.loop
         if len(journal.draft_nodes) < scfg.num_drafts:
             return None, 1.0
@@ -378,7 +381,7 @@ class LoopController:
             if debuggable:
                 return random.choice(debuggable), 1.0 / len(debuggable)
 
-        if not journal.good_nodes:
+        if not journal.improvable_nodes:
             return None, 1.0
         return self._select_improve_node(journal)
 
@@ -390,6 +393,26 @@ class LoopController:
         return (node.is_buggy and node.is_leaf and not node.debug_exhausted
                 and node.debug_depth <= self.cfg.loop.max_debug_depth)
 
+    def _debuggable_any(self, journal: Journal) -> bool:
+        return any(self._debuggable(n) for n in journal.nodes)
+
+    def _stop_looks_premature(self, journal: Journal, parent: Node,
+                              k: int, max_rounds: int) -> bool:
+        """決策層在 improve 輪回的 stop, 是否更像「只想放棄這條分支」?
+
+        判定為 True 的條件 (兩者皆須成立):
+          1. 輪數還沒過半 — 過半後的 stop 多半是真的收斂了, 尊重它;
+          2. 除了本輪這個基準節點, 樹上還有其他沒被放棄的成功節點可以繼續改良。
+        背景: stop 與 prune_branch 語意相近, 舊版 schema 甚至沒有 prune_branch,
+        決策層在明顯走不通的節點上回 stop, 整個 fold 就跟著提早結束 (實例:
+        run_20260729_151635/fold2 只跑 3 個 trial 就收工)。
+        """
+        if not getattr(self.cfg.loop, "stop_fuse", True):
+            return False
+        if k * 2 >= max_rounds:
+            return False
+        return any(n is not parent for n in journal.improvable_nodes)
+
     def _tree_view(self, journal: Journal) -> list[dict]:
         """把解答樹整理成可讀清單給決策層; allowed = 該節點現在允許的階段。"""
         out = []
@@ -397,7 +420,8 @@ class LoopController:
             if not n.evaluated:
                 continue
             allowed = []
-            if n.metric is not None:
+            # 決策層先前 prune 掉的分支不再列為可長 child 的節點 (仍留在樹上供比較)
+            if n.metric is not None and not n.improve_exhausted:
                 allowed.append("improve")
                 if self._resume_ready(n):
                     allowed.append("resume")
@@ -415,6 +439,7 @@ class LoopController:
                 "epochs": n.recipe.hparams.epochs,
                 "mutation": prov.get("mutation"),
                 "is_leaf": n.is_leaf,
+                "pruned": n.improve_exhausted,
                 "allowed": allowed,
             })
         return out
@@ -496,6 +521,8 @@ class LoopController:
             return _reject(f"找不到節點 {ov.parent_id}")
         if ov.stage == "improve" and target.metric is None:
             return _reject("該節點沒有成功的分數，無法作為改良基準")
+        if ov.stage in ("improve", "resume") and target.improve_exhausted:
+            return _reject("該分支先前已被決策層放棄（pruned）")
         if ov.stage == "debug" and not self._debuggable(target):
             return _reject("該節點不是可除錯的失敗葉節點（或除錯鏈已達上限）")
         if ov.stage == "resume" and not self._resume_ready(target):
@@ -844,10 +871,33 @@ class LoopController:
                     self._say("llm", action.narrative, kind="review", round=k)
                 # 決策層順帶要求的資訊 (分析器 / 問使用者) — 下一輪就會看到結果
                 self._handle_info(getattr(action, "info", None), k)
-                if action.stop or action.next_recipe is None:
+                prune = getattr(action, "prune_branch", False) or action.next_recipe is None
+                # 保險絲: 決策層說 stop, 但樹上還有沒被放棄的節點、且才跑不到一半的
+                # 輪數 → 多半是把「放棄這條分支」誤寫成「結束整個實驗」(歷史 bug:
+                # stop 欄位沒有說明, LLM 在死節點上回 stop 導致整場提早收工)。
+                # 降級成 prune, 搜尋改從別的節點繼續。
+                if action.stop and self._stop_looks_premature(
+                        journal, parent, k, max_rounds):
+                    self._say("system",
+                              f"決策層在第 {k} 輪要求結束實驗，但樹上仍有未放棄的節點"
+                              f"且輪數未過半 — 視為放棄 {parent.id} 這條分支，改從其他"
+                              f"節點繼續（要真的結束請用「中斷實驗」）。",
+                              kind="status", round=k)
+                    prune = True
+                elif action.stop:
                     self._say("llm", f"決定停止：{action.reason or '已收斂'}",
                               kind="decision", round=k)
                     break
+                if prune:
+                    parent.improve_exhausted = True
+                    self._say("llm", f"放棄分支 {parent.id}："
+                              f"{action.reason or '此節點無值得再試的變異'}",
+                              kind="decision", round=k)
+                    if not journal.improvable_nodes and not self._debuggable_any(journal):
+                        self._say("llm", "樹上所有分支都已放棄，結束搜尋。",
+                                  kind="decision", round=k)
+                        break
+                    continue
                 self._say("llm", f"對節點 {parent.id} 的變異：{action.mutation}"
                           f"（{action.reason}）", kind="decision", round=k)
                 recipe = action.next_recipe

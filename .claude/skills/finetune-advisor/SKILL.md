@@ -41,6 +41,10 @@ description: >-
 - `list[EncoderChoice]` — 建議的 encoder（含 `adaptation: finetune|lp` 與理由）。
 - `Recipe` — 完整可組合訓練配方。
 - `NextAction` — 改良動作或停止決定。
+  ⚠ `stop` 與 `prune_branch` 別混用：`stop=true` **結束整個實驗**（所有分支都收斂、
+  使用者要求、或再跑任何 trial 都不值得）；只是這一輪的變異基準節點走不通（例如
+  凍結特徵無訊號、權重載入不完整）時請用 `prune_branch=true`，搜尋會自動改從樹上
+  其他節點繼續。
 
 **輸出即契約**：只回結構化決策物件，不直接產生訓練程式碼；實體建構交給 Agent 的 `RecipeBuilder`。
 

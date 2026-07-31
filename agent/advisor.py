@@ -282,7 +282,8 @@ def build_advisor(advisor_cfg) -> Advisor:
         return HeuristicAdvisor()
     if t == "llm":
         from .llm_advisor import LLMAdvisor  # 延後匯入, 避免無 anthropic 時 import 失敗
-        adv = LLMAdvisor(model=getattr(advisor_cfg, "model", "claude-opus-4-8"),
+        # model 留空 → LLMAdvisor 用 default_model() (吃 MEDCLAW_LLM_MODEL)
+        adv = LLMAdvisor(model=getattr(advisor_cfg, "model", ""),
                          guidance=guidance,
                          allow_code_edit=getattr(advisor_cfg, "allow_code_edit", False))
         adv.check_environment()  # 環境不對即拋清楚錯誤 (不靜默退回 heuristic)

@@ -262,7 +262,8 @@ class HyperParams(BaseModel):
     input_size: int = 224; accum_iter: int = 1
 
 class NextAction(BaseModel):
-    stop: bool
+    stop: bool           # 結束整個 fold 的搜尋 (已收斂 / 使用者要求 / 不值得再跑)
+    prune_branch: bool = False   # 只放棄本輪的變異基準節點, 搜尋改從別的節點繼續
     reason: str
     mutation: Literal["add_regularizer","swap_head","change_augmentation",
                       "add_auxiliary_task","adjust_hparams","none"] = "none"

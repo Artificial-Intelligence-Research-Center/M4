@@ -345,6 +345,25 @@ def install():
 - 寫檔前呼叫 `egress.guard_payload()`，命中即拒寫；
 - 交握目錄的每次寫入同樣記入 `privacy_audit.jsonl`。
 
+### 7.5 出口的**目的地**是可設定的（收件人多一層）
+
+`llm_advisor._get_client()` 支援把端點換掉：設了 `ANTHROPIC_BASE_URL` +
+`ANTHROPIC_AUTH_TOKEN`（例：OpenRouter 的 Anthropic-compatible 端點
+`https://openrouter.ai/api`，模型 id 另以 `MEDCLAW_LLM_MODEL` 指定）就改走該端點；
+兩者皆未設才走 Anthropic 官方端點。
+
+圍欄本身**不受影響** —— 消毒（`DatasetFacts`/`ErrorFacts`）、出口掃描（§7.2）、
+sentinel（§7.3）、稽核（`privacy_audit.jsonl`）全部照舊在送出前發生，送出去的
+位元組與直連時完全相同。但這是本設計唯一的實質語意變化：
+
+> **設了代理端點，payload 的收件人就從「Anthropic」變成「代理商 + Anthropic」。**
+> 圍欄保證的是「送出去的內容已消毒」，不是「只有一方看得到」。
+> 涉及不可外流的資料時，請確認該代理商的資料保存政策，或維持官方直連
+> （不設這兩個環境變數即可）。
+
+稽核紀錄目前只記 `model`，不記端點；要事後分辨某次 run 走的是哪個端點，看 run 的
+環境（或 `llm_calls.jsonl` 裡的 model id 有無 provider 前綴）。
+
 ---
 
 ## 8. Layer 5 — 關掉「主動讀取」能力（L4 / L5）

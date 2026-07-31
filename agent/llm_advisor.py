@@ -21,6 +21,13 @@
 環境需求: `pip install anthropic` + 設定 ANTHROPIC_API_KEY (或 `ant auth login`)。
 若不可用, `build_advisor(type="llm")` 會在呼叫時拋出清楚錯誤; 可用 fallback=HeuristicAdvisor()
 讓迴圈退回規則式決策。
+
+**端點可切換 (Anthropic 直連 / OpenRouter)**: 見 `_get_client`。設了
+`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` 就改走該端點 (例: OpenRouter 的
+Anthropic-compatible 端點 `https://openrouter.ai/api`, 模型名如
+`anthropic/claude-opus-4.5`, 以 `MEDCLAW_LLM_MODEL` 指定); 兩者都沒設則行為與
+原本完全相同。⚠ 指到代理端點等於把 (已消毒的) payload 交給第三方轉送 —
+見 docs/data_firewall_design.md §7.5。
 """
 from __future__ import annotations
 
@@ -44,6 +51,81 @@ from .schemas import (
 )
 
 _MODEL = "claude-opus-4-8"
+
+
+def default_model() -> str:
+    """預設模型; `MEDCLAW_LLM_MODEL` 可覆寫。
+
+    換端點 (見 `_get_client`) 通常要連模型名一起換 (OpenRouter 用
+    `anthropic/claude-opus-4.5` 這種帶 provider 前綴的 id), 走 env 就不必去改
+    `~/.medclaw/settings.json` 或每張表單的預設值。
+    """
+    return (os.getenv("MEDCLAW_LLM_MODEL") or "").strip() or _MODEL
+
+
+def _endpoint_override() -> tuple[str, str]:
+    """(base_url, auth_token) — 兩者皆空 = 走 Anthropic 官方端點 (原本的行為)。
+
+    對齊 Claude Code / Anthropic SDK 的既有慣例: `ANTHROPIC_BASE_URL` 指端點,
+    `ANTHROPIC_AUTH_TOKEN` 是 bearer token (OpenRouter 的 `sk-or-...`);
+    `OPENROUTER_API_KEY` 只是常見的別名, 一併接受。
+    """
+    base_url = (os.getenv("ANTHROPIC_BASE_URL") or "").strip()
+    token = ((os.getenv("ANTHROPIC_AUTH_TOKEN")
+              or os.getenv("OPENROUTER_API_KEY") or "").strip())
+    return base_url, token
+
+
+def _endpoint_name() -> str:
+    """給錯誤訊息用的端點稱呼。"""
+    base_url = _endpoint_override()[0]
+    if not base_url:
+        return "Claude API"
+    if "openrouter" in base_url:
+        return f"OpenRouter ({base_url})"
+    return f"自訂端點 ({base_url})"
+
+
+def _credential_hint() -> str:
+    """給錯誤訊息用: 這個端點該設哪個環境變數。"""
+    if any(_endpoint_override()):
+        return "ANTHROPIC_BASE_URL 與 ANTHROPIC_AUTH_TOKEN"
+    return "ANTHROPIC_API_KEY（或已 `ant auth login`）"
+
+
+def _extra_body() -> dict:
+    """自訂端點要額外帶的 body 欄位 (官方端點回空 dict → 呼叫端不帶 extra_body)。
+
+    OpenRouter 會把同一個 `anthropic/*` model 路由到不同 provider (實測會落到
+    Amazon Bedrock 或 Anthropic first-party)。兩者都支援 thinking 與
+    `cache_control`(含 1h ttl), 但 **prompt cache 是各 provider 各自持有的** ——
+    一個 run 在兩者之間跳動就等於每次都 cache miss, 而本模組整個 prompt 分段設計
+    (見 _data_block) 就是為了命中那筆快取。故預設把 provider 釘在 anthropic
+    first-party (也是 OpenRouter 文件唯一保證 Anthropic-compatible 的路徑)。
+
+    `MEDCLAW_LLM_PROVIDER=off` 可關掉釘選 (讓 OpenRouter 自由路由); 給別的值則
+    釘到該 provider。
+    """
+    base_url = _endpoint_override()[0]
+    if "openrouter" not in base_url:
+        return {}
+    p = (os.getenv("MEDCLAW_LLM_PROVIDER") or "anthropic").strip()
+    if p.lower() in ("off", "any", ""):
+        return {}
+    return {"provider": {"only": [p]}}
+
+
+def normalize_model_key(model: str) -> str:
+    """把各端點的模型 id 正規化成 Anthropic 官方寫法, 供查表用 (見 _cache_min_chars)。
+
+    OpenRouter: `~anthropic/claude-opus-4.5:beta` → `claude-opus-4-5`
+    (去 `~` 別名記號、去 provider 前綴、截掉 `:` 變體後綴、`.` 版號改 `-`)。
+    """
+    m = (model or "").strip().lstrip("~")
+    m = m.split(":", 1)[0]
+    if "/" in m:
+        m = m.rsplit("/", 1)[-1]
+    return m.replace(".", "-")
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +202,15 @@ class _CodeEdit(BaseModel):
 
 class _NextDecision(_InfoMixin):
     """propose_next 的回應 — 變異動作 + 對應元件/超參變更。"""
-    stop: bool = False
+    stop: bool = Field(
+        default=False,
+        description="結束『整個實驗』的搜尋 — 只在所有分支都已收斂、使用者要求停止, "
+                    "或再跑任何 trial 都不值得時才設 true。只是本輪這個基準節點沒得改, "
+                    "請改用 prune_branch, 不要用 stop。")
+    prune_branch: bool = Field(
+        default=False,
+        description="只放棄『本輪的變異基準節點』這條分支 (例如該節點特徵無訊號、"
+                    "已知走不通), 實驗會自動改從樹上其他節點繼續。這不會結束實驗。")
     reason: str = ""
     mutation: Literal[
         "add_regularizer", "swap_head", "change_augmentation",
@@ -186,10 +276,10 @@ class LLMAdvisor:
     自動建構 (fail-closed) — 決策層在任何情況下都不會拿到未消毒的資料。
     """
 
-    def __init__(self, model: str = _MODEL, guidance: str = "",
+    def __init__(self, model: str = "", guidance: str = "",
                  allow_code_edit: bool = False,
                  privacy: Optional[PrivacyContext] = None):
-        self.model = model
+        self.model = model or default_model()
         self.guidance = guidance.strip()
         self.allow_code_edit = allow_code_edit  # 允許 LLM 修改程式 (副本, 見 code_workspace)
         self._client = None
@@ -205,6 +295,8 @@ class LLMAdvisor:
         # (見 _next_cache_ttl)
         self._last_call_ts: Optional[float] = None
         self._max_gap = 0.0
+        # 自訂端點未透傳 thinking 參數時, 本實例自動降級 (見 _thinking)
+        self._thinking_off = False
 
     # ---- 呼叫紀錄落地; 設定路徑時順便接續上一段的 cache 間隔統計 ---------
     @property
@@ -242,6 +334,21 @@ class LLMAdvisor:
         for prev, cur in zip(ts, ts[1:]):
             self._note_gap(cur - prev)
 
+    @staticmethod
+    def _usage_fields(resp) -> dict:
+        """回應的 token 用量 — 落地是為了**事後驗證 prompt cache 有沒有命中**。
+
+        `cache_read_input_tokens` 長期為 0 就代表 _data_block 的分段設計沒發揮
+        (換端點後尤其要看: 快取是各 provider 各自持有的, 見 _extra_body)。
+        """
+        u = getattr(resp, "usage", None)
+        if u is None:
+            return {}
+        out = {k: getattr(u, k, None) for k in
+               ("input_tokens", "output_tokens",
+                "cache_creation_input_tokens", "cache_read_input_tokens")}
+        return {"usage": {k: v for k, v in out.items() if v is not None}}
+
     def _log_call(self, record: dict) -> None:
         if not self.log_path:
             return
@@ -257,30 +364,88 @@ class LLMAdvisor:
         """驗證 SDK + 金鑰 + 連線。環境不對即以清楚訊息拋 RuntimeError。"""
         client = self._get_client()  # 無 anthropic 時已拋清楚錯誤
         try:
-            # 輕量請求驗證金鑰與連線 (快速失敗, 不重試); models.list 不帶任何 payload
-            client.with_options(timeout=20.0, max_retries=0).models.list(limit=1)
+            if _endpoint_override()[0]:
+                # 自訂端點 (OpenRouter 等) 沒有 Anthropic 格式的 GET /v1/models
+                # (回傳欄位不合 SDK 的 ModelInfo → 會驗證失敗, 被誤報成金鑰錯誤),
+                # 故改以一次最小 messages 呼叫當 ping。順帶驗證 model id 存在。
+                # 必須經 egress: privacy.sentinel 會擋掉不是從 egress.py 發出的呼叫。
+                egress_mod.create(
+                    client.with_options(timeout=30.0, max_retries=0),
+                    ctx=self._ctx().egress, label="check_environment",
+                    model=self.model,
+                    system=[{"type": "text", "text": "ping"}],
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=1, **self._extra())
+            else:
+                # 官方端點: models.list 不帶任何 payload 也不計費 (快速失敗, 不重試)
+                client.with_options(timeout=20.0, max_retries=0).models.list(limit=1)
         except Exception as e:
             raise RuntimeError(
-                "advisor=llm 無法連上 Claude API：請確認已設定 ANTHROPIC_API_KEY "
-                "（或已 `ant auth login`）且網路可連線。"
+                f"advisor=llm 無法連上 {_endpoint_name()}：請確認已設定"
+                f" {_credential_hint()} 且網路可連線, 且 model『{self.model}』"
+                f"在該端點存在。"
                 f"（{type(e).__name__}: {e}）。或改用 advisor.type=heuristic。") from e
 
     # ---- SDK client (延後建立) ----------------------------------------
     def _get_client(self):
+        """建立 SDK client; 依 env 決定打官方端點還是自訂 (OpenRouter) 端點。
+
+        自訂端點以 `Authorization: Bearer` 認證, 所以要 **顯式**把 x-api-key 關掉:
+        `web/settings.apply_env()` 會把 `~/.medclaw/settings.json` 裡的舊 Anthropic
+        key 灌進 os.environ, SDK 見到 api_key 就會優先送 x-api-key, 在 OpenRouter
+        上直接 401。api_key="" 讓 auth_headers 走 bearer, Omit() 再把空 header 拿掉。
+        """
         if self._client is None:
             try:
                 import anthropic
+                from anthropic._types import Omit
             except ImportError as e:
                 raise RuntimeError(
                     "advisor=llm 需要 anthropic SDK，但未安裝。請執行 "
                     "`pip install anthropic`，或改用 advisor.type=heuristic。") from e
+            base_url, token = _endpoint_override()
             try:
-                self._client = anthropic.Anthropic()  # 自環境/ant profile 解析金鑰
+                if base_url or token:
+                    kw = {"api_key": "", "auth_token": token,
+                          "default_headers": {"X-Api-Key": Omit()}}
+                    if base_url:
+                        kw["base_url"] = base_url
+                    self._client = anthropic.Anthropic(**kw)
+                else:
+                    self._client = anthropic.Anthropic()  # 自環境/ant profile 解析金鑰
             except Exception as e:
                 raise RuntimeError(
-                    "advisor=llm 無法建立 Claude client（可能缺少 ANTHROPIC_API_KEY，"
-                    f"或尚未 `ant auth login`）：{e}。或改用 advisor.type=heuristic。") from e
+                    f"advisor=llm 無法建立 {_endpoint_name()} client（可能缺少"
+                    f" {_credential_hint()}）：{e}。或改用 advisor.type=heuristic。") from e
         return self._client
+
+    # ---- thinking 參數 (自訂端點可能未透傳 → 可關) ----------------------
+    def _thinking(self) -> Optional[dict]:
+        """回傳要送的 thinking 參數; None = 整個參數不送。
+
+        `MEDCLAW_LLM_THINKING=off` 可預先關掉 (代理端點未支援 adaptive thinking 時);
+        另外 `_messages_parse` 遇到明確指向 thinking 的錯誤會自動降級一次
+        (見 self._thinking_off)。
+        """
+        if self._thinking_off:
+            return None
+        if (os.getenv("MEDCLAW_LLM_THINKING") or "").strip().lower() == "off":
+            return None
+        return {"type": "adaptive", "display": "summarized"}
+
+    def _extra(self) -> dict:
+        """要傳給 SDK 的 extra_body (自訂端點的 provider 路由; 見 _extra_body)。"""
+        body = _extra_body()
+        return {"extra_body": body} if body else {}
+
+    def _maybe_disable_thinking(self, err: Exception) -> bool:
+        """錯誤指向 thinking 參數 → 關掉它 (本實例) 並回 True 表示值得重試一次。"""
+        if self._thinking_off or self._thinking() is None:
+            return False
+        if "thinking" not in str(err).lower():
+            return False
+        self._thinking_off = True
+        return True
 
     # ---- 資料圍欄 ------------------------------------------------------
     def _ctx(self, profile: Optional[DatasetProfile] = None) -> PrivacyContext:
@@ -358,9 +523,15 @@ class LLMAdvisor:
 
     @property
     def _cache_min_chars(self) -> int:
-        """本模型下值得下 breakpoint 的最短前綴 (字元)。"""
+        """本模型下值得下 breakpoint 的最短前綴 (字元)。
+
+        先正規化模型名 — 經 OpenRouter 時 id 是 `anthropic/claude-opus-4.5` 這種
+        寫法, 直接 startswith 比對會全部 miss 而落到最保守的 4096, 白白少下
+        breakpoint (見 normalize_model_key)。
+        """
+        key = normalize_model_key(self.model)
         tok = next((v for k, v in self._CACHE_MIN_TOKENS.items()
-                    if self.model.startswith(k)), self._CACHE_MIN_TOKENS_DEFAULT)
+                    if key.startswith(k)), self._CACHE_MIN_TOKENS_DEFAULT)
         return tok * self._CHARS_PER_TOKEN
 
     # 同一次請求裡的所有 breakpoint 必須用同一個 ttl: API 規定 render 順序
@@ -588,6 +759,9 @@ class LLMAdvisor:
                 # 注意: adaptive thinking 的思考 token 也計入 max_tokens。4096 曾多次
                 # 被思考吃光導致正文空白或 JSON 截斷在字串中間 (pydantic EOF error),
                 # 故給足額度; display=summarized 讓思考摘要可落地到 log 以利除錯。
+                thinking = self._thinking()
+                if thinking is None:
+                    rec["thinking_disabled"] = True
                 resp = egress_mod.create(
                     client, ctx=ctx.egress, label=label,
                     model=self.model, system=system,
@@ -595,14 +769,15 @@ class LLMAdvisor:
                                "content": self._user_content(
                                    list(stable), prompt, ttl)}],
                     user_segments=user_segments,
-                    max_tokens=16000,
-                    thinking={"type": "adaptive", "display": "summarized"})
+                    max_tokens=16000, **self._extra(),
+                    **({"thinking": thinking} if thinking else {}))
                 text = "".join(getattr(b, "text", "") for b in resp.content
                                if getattr(b, "type", None) == "text").strip()
                 think = "".join(getattr(b, "thinking", "") for b in resp.content
                                 if getattr(b, "type", None) == "thinking")
                 rec["response"] = text
                 rec["stop_reason"] = resp.stop_reason
+                rec.update(self._usage_fields(resp))
                 if think:
                     rec["thinking"] = think
                 if resp.stop_reason == "max_tokens":
@@ -625,6 +800,12 @@ class LLMAdvisor:
                 from .privacy.errors import EgressViolation
                 if isinstance(e, EgressViolation):
                     raise            # 圍欄攔截: 不重試, 直接往上拋
+                if self._maybe_disable_thinking(e):
+                    # 端點不吃 thinking 參數 (代理未透傳): 關掉後重試, prompt 不變。
+                    # 這種錯誤是參數層的, 一定在第一次嘗試就發生, 所以重試額度夠。
+                    rec["thinking_disabled"] = True
+                    self._log_call({**rec, "note": "thinking 參數被端點拒絕, 已關閉重試"})
+                    continue
                 if attempt >= retries - 1:
                     raise
                 msg = str(e).lower()
@@ -777,17 +958,20 @@ class LLMAdvisor:
         d: _NextDecision = self._messages_parse(
             f"\n\nencoder: {encoder.model_key}。\n"
             f"本輪的變異基準 (樹搜尋 policy 依指標機率選出): {self._base_id(bt)}。\n"
-            f"請決定: 對此基準 Recipe 做『一個』正交變異再試, 或停止。"
+            f"請決定: 對此基準 Recipe 做『一個』正交變異再試, 或放棄此分支 "
+            f"(prune_branch), 或結束整個實驗 (stop)。"
             + self._info_note(ctx),
             _NextDecision, label="propose_next", profile=profile,
             stable=self._data_block(profile, history))
         next_recipe = None
-        if not d.stop and bt is not None:
+        if not d.stop and not d.prune_branch and bt is not None:
             next_recipe = self._apply_mutation(bt.recipe, d)
             if next_recipe is not None:
                 next_recipe.provenance["reason"] = d.reason
                 next_recipe.provenance["advisor"] = "llm"
-        return NextAction(stop=d.stop or next_recipe is None, reason=d.reason,
+        return NextAction(stop=d.stop, prune_branch=d.prune_branch or
+                          (not d.stop and next_recipe is None),
+                          reason=d.reason,
                           mutation=d.mutation, next_recipe=next_recipe,
                           info=self.last_info)
 
@@ -845,8 +1029,8 @@ class LLMAdvisor:
                 client, ctx=ctx.egress, label="narrate_best", model=self.model,
                 system=[{"type": "text", "text": self._RULES}],
                 messages=[{"role": "user", "content": prompt}],
-                user_segments=(), max_tokens=800,
-                thinking={"type": "adaptive", "display": "summarized"})
+                user_segments=(), max_tokens=800, **self._extra(),
+                **({"thinking": t} if (t := self._thinking()) else {}))
             return "".join(getattr(b, "text", "") for b in resp.content
                            if getattr(b, "type", None) == "text").strip()
         except Exception:
@@ -938,22 +1122,28 @@ class LLMAdvisor:
               f"訓練結束時 loss 仍明顯下降 → epochs 不足, 應增加; loss 很早就收斂平坦、"
               f"或 val_loss 開始回升 (過擬合) → 應減少 epochs。需要時 mutation=adjust_hparams, "
               f"在 hparam_overrides_json 設 epochs, 並在 reason 依曲線說明增/減的依據; "
-              f"(3) 納入使用者討論, 決定對『變異基準』Recipe 做『一個』正交變異再試, "
-              f"或在已收斂/使用者要求/不值得再跑時停止。討論中標有【QA 結論】的訊息"
+              f"(3) 納入使用者討論, 決定對『變異基準』Recipe 做『一個』正交變異再試; "
+              f"若這個基準節點本身走不通 (例如凍結特徵無訊號、權重載入不完整), "
+              f"設 prune_branch=true 放棄『這條分支』即可 — 實驗會自動改從樹上其他節點"
+              f"繼續, 不要因此設 stop; stop=true 專門保留給『所有分支都已收斂 / 使用者"
+              f"要求停止 / 再跑任何 trial 都不值得』的情況, 它會結束整個實驗。"
+              f"討論中標有【QA 結論】的訊息"
               f"是問答 agent 先前依實驗資料對使用者提問得出的結論 — 除非與最新數據"
               f"矛盾, 本輪決策應優先採納最近的一則; "
             + edit_note + self._info_note(ctx),
             _ReviewDecision, label="review_and_decide", profile=profile,
             user_segments=segs, stable=self._data_block(profile, history))
         next_recipe = None
-        if not d.stop and bt is not None:
+        if not d.stop and not d.prune_branch and bt is not None:
             next_recipe = self._apply_mutation(
                 bt.recipe, d, workspace_dir=workspace_dir,
                 tag=f"improve_t{len(history)}")
             if next_recipe is not None:
                 next_recipe.provenance["reason"] = d.reason
                 next_recipe.provenance["advisor"] = "llm"
-        return NextAction(stop=d.stop or next_recipe is None, reason=d.reason,
+        return NextAction(stop=d.stop, prune_branch=d.prune_branch or
+                          (not d.stop and next_recipe is None),
+                          reason=d.reason,
                           narrative=d.narrative, mutation=d.mutation,
                           next_recipe=next_recipe, info=self.last_info)
 
@@ -1008,11 +1198,12 @@ class LLMAdvisor:
                 messages=[{"role": "user",
                            "content": self._user_content(stable, volatile, ttl)}],
                 on_delta=on_delta, user_segments=segs,
-                max_tokens=16000,
-                thinking={"type": "adaptive", "display": "summarized"})
+                max_tokens=16000, **self._extra(),
+                **({"thinking": t} if (t := self._thinking()) else {}))
             text = (text or "").strip()
             rec["response"] = text
             rec["stop_reason"] = resp.stop_reason
+            rec.update(self._usage_fields(resp))
             think = "".join(getattr(b, "thinking", "") for b in resp.content
                             if getattr(b, "type", None) == "thinking")
             if think:

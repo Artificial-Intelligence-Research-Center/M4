@@ -18,6 +18,7 @@
 
 - **最聰明**、能讀懂你的引導方向與討論訊息。
 - 需要 `ANTHROPIC_API_KEY`（在「設定」頁或環境變數）。環境不可用時各決策會自動退回 heuristic。
+- 也可改走 Anthropic-compatible 的代理端點（如 OpenRouter）：設 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` + `MEDCLAW_LLM_MODEL` 三個環境變數即可，見 `.env`。
 - 仍受**資料圍欄**約束：LLM 看不到影像、檔名、路徑、真實類別名。
 
 <!-- key: advisor.heuristic -->

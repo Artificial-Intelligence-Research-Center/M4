@@ -148,6 +148,16 @@ def test_cache_min_chars_is_model_specific():
             == LLMAdvisor._CACHE_MIN_TOKENS_DEFAULT * 4)
 
 
+def test_cache_min_chars_understands_proxy_model_ids():
+    """經 OpenRouter 時 id 長得不一樣 (provider 前綴 / 點號版號 / 變體後綴)。
+
+    沒正規化的話會全部落到最保守的 4096, 白白少下 breakpoint。
+    """
+    assert LLMAdvisor(model="anthropic/claude-opus-4.5")._cache_min_chars == 4096 * 4
+    assert LLMAdvisor(model="anthropic/claude-opus-4.8")._cache_min_chars == 1024 * 4
+    assert LLMAdvisor(model="~anthropic/claude-sonnet-5:beta")._cache_min_chars == 1024 * 4
+
+
 def test_breakpoint_only_when_prefix_is_long_enough():
     adv = LLMAdvisor(model="claude-opus-5")
     n = adv._cache_min_chars

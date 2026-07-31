@@ -1,6 +1,8 @@
 <!-- key: anthropic_api_key -->
 供 `advisor=llm/skill` 呼叫 Claude API 使用。留空＝沿用現有值（不清除）。也可改用環境變數 `ANTHROPIC_API_KEY` 或 `ant auth login`。存於 `~/.medclaw/settings.json`（權限 600，不進 git）。
 
+**經 OpenRouter 等代理端點時這個欄位不用填**：改設環境變數 `ANTHROPIC_BASE_URL`（例 `https://openrouter.ai/api`）+ `ANTHROPIC_AUTH_TOKEN`（`sk-or-...`）+ `MEDCLAW_LLM_MODEL`（例 `anthropic/claude-opus-4.5`）。有設這兩個變數時本欄位的 key 會被忽略（改用 bearer 認證）。範例見 repo 根目錄的 `.env`。
+
 <!-- key: advisor_type -->
 決策層：**llm**（Claude 決策，最聰明，需金鑰）／**heuristic**（規則式，免金鑰、可離線、可重現）／**skill**（委派 Claude Code skill）。新實驗的預設，工作台表單可覆寫。
 

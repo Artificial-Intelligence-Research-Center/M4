@@ -18,6 +18,7 @@
       debug_prob: 0.5
       max_debug_depth: 2
     advisor: { type: llm, model: claude-opus-4-8, allow_code_edit: false }
+                                  # model 省略 = MEDCLAW_LLM_MODEL 或內建預設
     budget: { max_wall_clock_min: null }
     privacy: { mode: strict }     # 資料圍欄; 見 docs/data_firewall_design.md
 
@@ -32,6 +33,12 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from .schemas import EvalConfig
+
+
+def _default_model() -> str:
+    """LLM 預設模型 (延後 import 避開 config ↔ llm_advisor 的循環相依)。"""
+    from .llm_advisor import default_model
+    return default_model()
 
 
 class LoopConfig(BaseModel):
@@ -56,6 +63,10 @@ class LoopConfig(BaseModel):
     # 換 encoder、開新 draft、回頭改某個節點時, 這是唯一能落實的地方。
     # heuristic advisor 一律沿用 policy; 不合法的改選也會被拒絕並沿用 policy。
     select_override: bool = True
+    # 保險絲: 決策層在 improve 輪回 stop, 但輪數未過半且樹上還有其他未放棄的節點時,
+    # 降級成「只放棄這條分支」(prune) 而非結束整場實驗。stop 與 prune_branch 語意
+    # 相近, 決策層在死節點上很容易誤用 stop, 這條保險絲避免整個 fold 提早收工。
+    stop_fuse: bool = True
     # 繼續訓練策略: 選中節點的 curve 未收斂時, 從其 checkpoint 續訓再多跑幾個 epoch
     resume_unconverged: bool = True  # 開/關此策略
     resume_epochs: int = 20          # 每次續訓多跑的 epoch 數
@@ -66,7 +77,9 @@ class LoopConfig(BaseModel):
 
 class AdvisorConfig(BaseModel):
     type: Literal["heuristic", "llm", "skill"] = "llm"   # 預設用 LLM 決策 (無 SDK/金鑰時各方法自動退回 heuristic)
-    model: str = "claude-opus-4-8"
+    # 預設模型; `MEDCLAW_LLM_MODEL` 可覆寫 — 換端點 (OpenRouter) 時模型 id 也要換,
+    # 走 env 就不必改 ~/.medclaw/settings.json 或每張表單。見 llm_advisor._get_client。
+    model: str = Field(default_factory=lambda: _default_model())
     preset: str = "default"        # HeuristicAdvisor 冷啟動超參起點
     guidance: str = ""             # 使用者引導方向 (LLMAdvisor 會納入決策 prompt)
     # 允許 LLM 修改訓練程式 (debug 階段): 修改版放 run 目錄下 (code_workspace),
