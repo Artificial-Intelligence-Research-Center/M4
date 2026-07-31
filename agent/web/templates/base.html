@@ -108,7 +108,11 @@
   .nb-cell > .h { background:#f4f6f9; border-bottom:1px solid #e3e6ea; padding:7px 12px;
                   font-size:12px; color:#3a4a6b; font-weight:600; display:flex; justify-content:space-between;
                   align-items:center; gap:8px; }
-  .nb-cell > .b { padding:12px 14px; }
+  /* 標題文字可壓縮 (min-width:0 + 省略號) → 右上工具列不會被擠出格子外 */
+  .nb-cell > .h > span:first-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* 內容比欄寬時在格子內橫向捲動, 不撐破右欄 */
+  .nb-cell > .b { padding:12px 14px; overflow-x:auto; }
+  .pane-right > *, .pane-left > * { max-width:100%; }
   /* 每格標題列工具: 縮放層級 − / 100% / ＋ 與全螢幕 ⛶ */
   .cell-tools { display:inline-flex; gap:3px; align-items:center; flex:0 0 auto; }
   .cell-tools button { margin:0; padding:0 7px; font-size:12px; line-height:20px; height:22px;
@@ -157,6 +161,21 @@
 <main class="{% block main_class %}{% endblock %}">
 {% block content %}{% endblock %}
 </main>
+<!-- 圖表/圖片放大檢視 (點任一圖表或 confusion matrix 開啟; Esc 或點背景關閉) -->
+<div id="zoom-modal" style="display:none;position:fixed;inset:0;z-index:1100;background:rgba(15,23,42,.55)"
+     onclick="if(event.target===this) closeZoom()">
+  <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+    <div class="card" style="pointer-events:auto;width:min(1180px,96vw);max-height:92vh;overflow:auto;
+         margin:0;box-shadow:0 12px 40px rgba(0,0,0,.35)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <h2 id="zoom-title" style="margin:0;flex:1;font-size:15px"></h2>
+        <button type="button" onclick="closeZoom()" title="關閉 (Esc)"
+          style="margin:0;background:#f4f5f7;color:#333;padding:4px 10px;flex:0 0 auto">✕</button>
+      </div>
+      <div id="zoom-body" style="margin-top:8px"></div>
+    </div>
+  </div>
+</div>
 <script>
 // ---- 共用小工具 ----
 function fmt(x){ return (x===null||x===undefined) ? '—' : Number(x).toFixed(4); }
@@ -203,7 +222,7 @@ function encColor(map, key){
   return map[key];
 }
 function svgLine(series){
-  const W=440,H=150,P=36, all=[];
+  const W=440,H=260,P=36, all=[];   // H 加高 → 各條線之間的起伏看得更清楚
   series.forEach(s => (s.data||[]).forEach(v => { if(v!=null) all.push(v); }));
   if(!all.length) return '<div class="muted">（尚無逐 epoch 曲線；訓練開始後出現）</div>';
   const n = Math.max(...series.map(s => (s.data||[]).length));
@@ -212,7 +231,7 @@ function svgLine(series){
   const Y=v => H-P - (v-mn)/(mx-mn)*(H-P-10);
   const active = series.filter(s=>(s.data||[]).some(v=>v!=null));
   const meta = {W,H,P,n,mn,mx,series: active.map(s=>({name:s.name,color:s.color,data:s.data||[]}))};
-  let g=`<svg class="linechart" viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px" `
+  let g=`<svg class="linechart" viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin:0" `
       +`data-chart="${encodeURIComponent(JSON.stringify(meta))}">`;
   g+=`<line x1="${P}" y1="${H-P}" x2="${W-4}" y2="${H-P}" stroke="#ccd0d6"/>`;
   g+=`<line x1="${P}" y1="8" x2="${P}" y2="${H-P}" stroke="#ccd0d6"/>`;
@@ -248,10 +267,13 @@ function svgLine(series){
   g+='</g>';
   g+=`<rect class="xh-cap" x="${P}" y="8" width="${W-P-4}" height="${H-P-8}" fill="transparent" style="cursor:crosshair"/>`;
   g+='</svg>';
-  let lg = active.map((s,k)=>`<span class="lg-s" data-s="${k}" style="border-radius:4px;padding:0 3px">`
+  let lg = active.map((s,k)=>`<span class="lg-s" data-s="${k}" title="點一下鎖定這條線（再點一下解除）"`
+    +` style="border-radius:4px;padding:0 3px;cursor:pointer;user-select:none">`
     +`<span style="color:${s.color}">■</span> ${s.name}</span>`).join(' &nbsp; ');
   if(active.some(s=>s.best)) lg+=' &nbsp; <span class="muted">◎ 空心圈=最佳點（▲最大/▼最小 @epoch）</span>';
-  return '<div class="chartwrap">' + g
+  // data-ckey: 圖表識別 (系列名稱組合) → 重繪後仍能還原「鎖定的線」
+  const ckey=active.map(s=>s.name).join('|');
+  return `<div class="chartwrap" data-ckey="${esc(ckey)}" style="text-align:left" title="點圖表可放大檢視">` + g
     + '<div class="xh-tip muted" style="font-size:11px;min-height:15px;margin-top:1px">移到圖上看各點數值</div>'
     + `<div style="font-size:11px;margin-top:-2px">${lg}</div></div>`;
 }
@@ -260,7 +282,8 @@ function svgBars(items){
   const W=480, bh=24, P=210, mx=Math.max(...items.map(i=>i.value), 0.0001), H=items.length*bh+8;
   // 最佳 trial (最大值; 同分取先出現者) → 深色外框 + ★ 標記
   const bi=items.reduce((b,it,i)=> it.value>items[b].value ? i : b, 0);
-  let g=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px">`;
+  let g=`<svg class="zoomable" viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;cursor:zoom-in">`
+      + '<title>點圖表可放大檢視</title>';
   items.forEach((it,i)=>{
     const y=i*bh+4, w=Math.max((it.value/mx)*(W-P-46),1), best=(i===bi);
     g+=`<text x="0" y="${y+15}" font-size="10" fill="#444" ${best?'font-weight="700"':''}>${esc(it.label)}</text>`;
@@ -296,6 +319,7 @@ function applyCellUI(container){
     const key=el.getAttribute('data-key');
     if(key && _cellUI[key]) _syncCellUI(el, key);
   });
+  applyChartLocks(container);   // 重繪後還原「圖例鎖定」的高亮
 }
 function exitAllFullscreen(){
   let had=false;
@@ -343,11 +367,14 @@ document.addEventListener('mousemove', function(e){
     else if(d){ d.style.display=''; d.setAttribute('cx',X); d.setAttribute('cy',Yv(val).toFixed(1)); }
   });
   // 最近曲線偵測: 游標與各系列在 epoch i 的點之垂直距離 < 15 (viewBox 座標) → 高亮
+  // 若該圖表已用圖例鎖定某條線, 就固定用鎖定值, 不再隨游標位置切換
   let hotK=-1, hotD=15;
   series.forEach((s,k)=>{ const val=s.data[i]; if(val==null) return;
     const dd=Math.abs(Yv(val)-sy); if(dd<hotD){ hotD=dd; hotK=k; } });
   const wrap=svg.closest('.chartwrap');
-  _chartHot(svg, wrap, hotK);
+  const lockK=_chartLockOf(wrap);
+  if(lockK>=0) hotK=lockK;
+  _chartHot(svg, wrap, hotK, lockK);
   const tip=wrap&&wrap.querySelector('.xh-tip');
   if(tip){
     const parts=['epoch '+i].concat(series.map((s,k)=>{
@@ -359,7 +386,9 @@ document.addEventListener('mousemove', function(e){
   }
 });
 // 套用/重設「最近曲線」高亮: 曲線加粗、其餘變淡; 下方圖例文字同步高亮
-function _chartHot(svg, wrap, hotK){
+// lockK>=0 → 該線是被圖例鎖定的, 圖例多加一個外框讓使用者看得出鎖定狀態
+function _chartHot(svg, wrap, hotK, lockK){
+  if(lockK==null) lockK=_chartLockOf(wrap);
   svg.querySelectorAll('polyline.ln').forEach(pl=>{
     const k=+pl.getAttribute('data-s');
     if(hotK<0){ pl.setAttribute('stroke-width','1.7'); pl.style.opacity=''; }
@@ -372,16 +401,103 @@ function _chartHot(svg, wrap, hotK){
     if(hotK>=0 && k===hotK){ el.style.opacity='1'; el.style.fontWeight='700'; el.style.background='#fff3bf'; }
     else if(hotK>=0){ el.style.opacity='0.4'; el.style.fontWeight=''; el.style.background=''; }
     else { el.style.opacity=''; el.style.fontWeight=''; el.style.background=''; }
+    el.style.boxShadow = (k===lockK) ? 'inset 0 0 0 1.5px #1f2a44' : '';
   });
 }
+// ---- 圖例鎖定: 點圖例 → 固定高亮那條線, 不再跟著游標切換 ----
+// 狀態存在 map (key=chartwrap data-ckey), 不寫進 HTML → notebook 輪詢重繪後仍保留
+const _chartLock = {};
+function _chartLockOf(wrap){
+  if(!wrap) return -1;
+  const k=wrap.getAttribute('data-ckey');
+  return (k && k in _chartLock) ? _chartLock[k] : -1;
+}
+function applyChartLocks(container){
+  (container||document).querySelectorAll('.chartwrap').forEach(wrap=>{
+    const svg=wrap.querySelector('svg.linechart'); if(!svg) return;
+    const lockK=_chartLockOf(wrap);
+    _chartHot(svg, wrap, lockK, lockK);
+  });
+}
+document.addEventListener('click', function(e){
+  const el=e.target.closest && e.target.closest('.lg-s'); if(!el) return;
+  const wrap=el.closest('.chartwrap'); if(!wrap) return;
+  const ckey=wrap.getAttribute('data-ckey'); if(!ckey) return;
+  const k=+el.getAttribute('data-s');
+  if(_chartLock[ckey]===k) delete _chartLock[ckey];   // 再點同一個 → 解除鎖定
+  else _chartLock[ckey]=k;
+  // 同一頁上同類圖表 (相同系列組合) 一起同步
+  document.querySelectorAll(`.chartwrap[data-ckey="${CSS.escape(ckey)}"]`).forEach(w=>{
+    const svg=w.querySelector('svg.linechart'); if(!svg) return;
+    const lockK=_chartLockOf(w);
+    _chartHot(svg, w, lockK, lockK);
+  });
+});
+// ---- 放大檢視: 點任一圖表 / confusion matrix → 在對話框中放大顯示 -------------
+// 折線圖是整個 .chartwrap 複製過去 (十字游標、圖例鎖定在放大後照常可用);
+// histogram / 解答樹 / 圖片則放大該元素本身。
+function openZoom(srcNode, title){
+  const m=document.getElementById('zoom-modal'), b=document.getElementById('zoom-body');
+  if(!m || !b || !srcNode) return;
+  const c=srcNode.cloneNode(true);
+  const tag=(c.tagName||'').toLowerCase();
+  const svgs=(tag==='svg') ? [c] : Array.from(c.querySelectorAll('svg'));
+  svgs.forEach(s=>{ s.style.maxWidth='none'; s.style.width='100%'; s.style.height='auto'; });
+  const imgs=(tag==='img') ? [c] : Array.from(c.querySelectorAll('img'));
+  imgs.forEach(i=>{ i.style.maxWidth='100%'; i.style.width='auto';
+                    i.style.maxHeight='78vh'; i.style.display='block'; i.style.margin='0 auto'; });
+  // 原本橫向捲動的容器 (解答樹) 在放大後也保留捲動能力
+  Array.from(c.querySelectorAll('[style*="overflow-x"]')).forEach(d=>{ d.style.overflowX='auto'; });
+  b.innerHTML=''; b.appendChild(c);
+  document.getElementById('zoom-title').textContent=title||'放大檢視';
+  m.style.display='';
+}
+function closeZoom(){
+  const m=document.getElementById('zoom-modal');
+  if(!m) return;
+  m.style.display='none';
+  const b=document.getElementById('zoom-body'); if(b) b.innerHTML='';
+}
+// 放大檢視的標題: 取所在 notebook 格的標題 + 圖表上方那行說明
+function _zoomTitle(el, fallback){
+  const parts=[];
+  const cell=el.closest && el.closest('.nb-cell');
+  const ct=cell && cell.querySelector('.h > span:first-child');
+  if(ct && ct.textContent.trim()) parts.push(ct.textContent.trim());
+  const lab=el.previousElementSibling;
+  if(lab && lab.classList && lab.classList.contains('muted') && lab.textContent.trim())
+    parts.push(lab.textContent.trim());
+  else if(fallback) parts.push(fallback);
+  return parts.join(' — ') || (fallback || '放大檢視');
+}
+document.addEventListener('click', function(e){
+  if(!e.target.closest) return;
+  if(e.target.closest('#zoom-modal')) return;      // 已在放大檢視內
+  if(e.target.closest('.lg-s')) return;            // 圖例 = 鎖定曲線, 不放大
+  if(e.target.closest('.cell-tools')) return;      // 每格工具列
+  if(e.target.closest('g[data-tid]')) return;      // 解答樹節點 = 開 trial 結果
+  if(e.target.closest('a,button,input,select,textarea,label')) return;
+  const img=e.target.closest('img.zoomable');
+  if(img){ openZoom(img, _zoomTitle(img, 'confusion matrix')); return; }
+  const wrap=e.target.closest('.chartwrap');       // 折線圖 (含圖例與提示列)
+  if(wrap){ openZoom(wrap, _zoomTitle(wrap, '曲線')); return; }
+  const svg=e.target.closest('svg.zoomable');      // histogram / 解答樹
+  if(svg){ openZoom(svg.closest('[style*="overflow-x"]') || svg, _zoomTitle(svg, '圖表')); return; }
+});
+document.addEventListener('keydown', function(e){
+  if(e.key!=='Escape') return;
+  const m=document.getElementById('zoom-modal');
+  if(m && m.style.display!=='none') closeZoom();
+});
 document.addEventListener('mouseout', function(e){
   const cap=e.target;
   if(!cap || !cap.classList || !cap.classList.contains('xh-cap')) return;
   const svg=cap.ownerSVGElement; if(!svg) return;
   const g=svg.querySelector('.xh'); if(g) g.style.display='none';
   const wrap=svg.closest('.chartwrap'), tip=wrap&&wrap.querySelector('.xh-tip');
-  _chartHot(svg, wrap, -1);   // 離開圖表 → 還原所有曲線與圖例
-  if(tip) tip.textContent='移到圖上看各點數值';
+  const lockK=_chartLockOf(wrap);
+  _chartHot(svg, wrap, lockK, lockK);   // 離開圖表 → 還原 (有鎖定就維持鎖定的線)
+  if(tip) tip.textContent = lockK>=0 ? '已鎖定圖例（再點一次圖例可解除）' : '移到圖上看各點數值';
 });
 </script>
 {% block script %}{% endblock %}

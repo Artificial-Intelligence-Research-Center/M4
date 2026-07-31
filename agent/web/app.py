@@ -200,20 +200,71 @@ def _parse_curves(log_path: str) -> dict:
     train_loss = [float(x) for x in re.findall(
         r"Averaged stats:.*?loss:\s*[\d.]+\s*\(([\d.]+)\)", text)]
     val_loss = [float(x) for x in re.findall(r"val loss:\s*([\d.]+)", text)]
-    val_score, val_acc, val_auc, val_f1 = [], [], [], []
+    # 逐 epoch 全部內建指標都留著 → 前端可依 primary_metric 決定畫哪條、標哪個最佳點
+    val_all: dict[str, list[float]] = {k: [] for k in _METRIC_KEYS}
     for mm in _METRIC_RE.finditer(text):
-        g = [float(x) for x in mm.groups()]
-        d = dict(zip(_METRIC_KEYS, g))
-        val_score.append(d["score"]); val_acc.append(d["accuracy"])
-        val_auc.append(d["roc_auc"]); val_f1.append(d["f1"])
+        d = dict(zip(_METRIC_KEYS, [float(x) for x in mm.groups()]))
+        for k in _METRIC_KEYS:
+            val_all[k].append(d[k])
+    val_score = val_all["score"]
     n = max(len(train_loss), len(val_score), len(val_loss))
     return {
         "epochs": list(range(n)),
         "train_loss": train_loss, "val_loss": val_loss,
-        "val_score": val_score, "val_accuracy": val_acc,
-        "val_roc_auc": val_auc, "val_f1": val_f1,
+        "val_score": val_score, "val_accuracy": val_all["accuracy"],
+        "val_roc_auc": val_all["roc_auc"], "val_f1": val_all["f1"],
+        "val_metrics": val_all,
         "final_test": next((f for f in reversed(finals) if f["mode"] == "test"), None),
     }
+
+
+# 內建指標中「越小越好」的; 其餘一律越大越好 (前端最佳點標記與 running trial 取最佳同用)
+_LOWER_BETTER = {"hamming"}
+
+
+def _metric_key(name: str) -> str:
+    """primary_metric → log 指標欄位名 (auroc→roc_auc 等別名沿用 evaluator 的表)。"""
+    from ..evaluator import _METRIC_ALIASES
+    return _METRIC_ALIASES.get(name, name)
+
+
+def _best_of(curve: list[float] | None, key: str):
+    if not curve:
+        return None
+    return min(curve) if key in _LOWER_BETTER else max(curve)
+
+
+def _fold_manifest(run_dir: str) -> dict:
+    """讀 run 的 folds.json (逐 fold 索引); 讀不到回 {}。"""
+    fjp = os.path.join(run_dir, "folds.json")
+    if not os.path.isfile(fjp):
+        return {}
+    try:
+        with open(fjp, encoding="utf8") as fh:
+            return json.load(fh) or {}
+    except Exception:
+        return {}
+
+
+def _is_parallel_parent(run_dir: str) -> bool:
+    """此 run 是否為『逐 fold 平行』的父層 (各 fold 為 run_dir/foldN 子執行)。"""
+    return _fold_manifest(run_dir).get("mode") == "per_fold_parallel"
+
+
+def _run_primary_metric(run_dir: str) -> str:
+    """本次 run 實際採用的 primary_metric (config.yaml 快照; 讀不到就回預設 score)。"""
+    cp = os.path.join(run_dir, "config.yaml")
+    if os.path.isfile(cp):
+        try:
+            import yaml
+            with open(cp, encoding="utf8") as fh:
+                d = yaml.safe_load(fh) or {}
+            pm = ((d.get("eval") or {}).get("primary_metric"))
+            if pm:
+                return str(pm)
+        except Exception:
+            pass
+    return "score"
 
 
 @app.route("/progress")
@@ -640,12 +691,30 @@ def resume_run():
     if (g := request.form.get("guidance", "").strip()):
         cfg.advisor.guidance = g
 
+    # 這個 run 是不是『逐 fold 平行』的父層? 若是, 一般「繼續實驗」必須改走 fleet:
+    # 否則 auto_finetune 會用 aggregation=per_fold 走 LoopController 的『循序』分 fold,
+    # 直接在父目錄跑 trial 並把 folds.json 覆寫成 {"mode":"per_fold"} —— 各 fold 子執行
+    # 就此從 UI 消失 (fold 下拉不見)。
+    is_fleet = _is_parallel_parent(run_dir)
+    if is_fleet:
+        cfg.eval.aggregation = "per_fold"      # 確保 run_fleet 分派各 fold
+        for ent in (_fold_manifest(run_dir).get("folds") or []):
+            sub = os.path.join(run_dir, ent.get("subdir", ""))
+            if os.path.isdir(sub):
+                try:
+                    convo.clear_stop(sub)
+                except Exception:
+                    pass
+
     convo.clear_stop(run_dir)   # 立即清旗標, 讓前端「已中斷」橫幅先消失
     convo.append(run_dir, "system",
-                 "▶ 已排入繼續實驗（重建解答樹中，請稍候…）", kind="status")
+                 ("▶ 已排入繼續實驗（逐 fold 平行：各 fold 在既有樹後繼續）…"
+                  if is_fleet else "▶ 已排入繼續實驗（重建解答樹中，請稍候…）"),
+                 kind="status")
 
     job_id = f"resume_{len(JOBS) + 1}"
-    JOBS[job_id] = {"status": "queued", "kind": "resume", "run": run,
+    JOBS[job_id] = {"status": "queued", "kind": "resume_full" if is_fleet else "resume",
+                    "run": run,
                     "run_dir": run_dir, "advisor": cfg.advisor.type,
                     "encoder": "resume", "preset": cfg.advisor.preset,
                     "data_path": cfg.data_path}
@@ -654,6 +723,13 @@ def resume_run():
         with _LOCK:
             JOBS[job_id]["status"] = "running"
         try:
+            if is_fleet:
+                from ..fold_fleet import run_fleet
+                out = run_fleet(cfg, run_dir=run_dir, resume=True)
+                with _LOCK:
+                    JOBS[job_id].update(status="finished", n_trials=out.get("n_trials"),
+                                        report=out.get("report_path"))
+                return
             out = auto_finetune.run(cfg, run_dir=run_dir, resume=True)
             # 若這是逐 fold 平行的子執行 (parent/foldN): 該 fold report 已更新,
             # 這裡再重新彙整父層 (best/跨 fold 集成/父 report.md), 避免全域報告過時。
@@ -822,6 +898,8 @@ def run_status():
     if not os.path.isdir(run_dir):
         return jsonify({"ok": False, "error": f"找不到 run: {run}"}), 404
 
+    primary_metric = _run_primary_metric(run_dir)
+
     trials = []
     try:
         trials = [t.model_dump() for t in Ledger(run_dir).history()]
@@ -871,12 +949,17 @@ def run_status():
                 tlog = os.path.join(run_dir, "logs", f"log_{tid}.txt")
                 curves = _parse_curves(tlog) if os.path.isfile(tlog) else {}
                 prog = _parse_progress(tlog) if os.path.isfile(tlog) else {}
+                # 進行中的「目前最佳」要用本 run 的 primary_metric 取, 不能用 log 裡
+                # main_finetune 印的 "Best score" (那永遠是內建複合 score)。
+                pk = _metric_key(primary_metric)
+                run_best = _best_of((curves.get("val_metrics") or {}).get(pk), pk)
                 running_trial = {
                     "trial_id": tid, "recipe": ct.get("recipe", {}),
                     "status": prog.get("status", "running"),
                     # 進行中還沒跑最終 test → 這裡的分數/指標其實是 val (前端會標明)
                     "is_running": True,
-                    "primary_score": prog.get("best_score") or 0.0,
+                    "primary_score": (run_best if run_best is not None
+                                      else (prog.get("best_score") or 0.0)),
                     "metrics": prog.get("val") or {},
                     "curves": curves, "cm_img": None,
                     "cur_epoch": prog.get("cur_epoch"),
@@ -984,6 +1067,9 @@ def run_status():
     }
 
     return jsonify({"ok": True, "run": run, "trials": trials,
+                    "primary_metric": primary_metric,
+                    "primary_metric_key": _metric_key(primary_metric),
+                    "primary_lower_better": _metric_key(primary_metric) in _LOWER_BETTER,
                     "current": current, "report": report,
                     "report_html": report_html, "n_done": len(trials),
                     "config": config_text, "running_trial": running_trial,

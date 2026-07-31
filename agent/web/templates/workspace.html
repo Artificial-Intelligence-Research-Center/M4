@@ -370,7 +370,8 @@ function svgTree(tree, cmap){
   const maxX=Math.max(...Object.values(pos).map(p=>p.x));
   const W=padX*2+maxX*hgap+R*2, H=padT+maxD*vgap+R*2+padB;
   const X=i=>padX+R+pos[i].x*hgap, Y=i=>padT+R+pos[i].y*vgap;
-  let g=`<svg viewBox="0 0 ${W} ${H}" width="${Math.min(W,640)}" style="max-width:100%">`;
+  let g=`<svg class="zoomable" viewBox="0 0 ${W} ${H}" width="${Math.min(W,640)}"`
+    +` style="max-width:100%;cursor:zoom-in"><title>點空白處放大檢視；點節點看該 trial 完整結果</title>`;
   // 邊: 先畫線, 節點蓋在上面
   nodes.forEach((n,i)=>{ if(n.parent!==null&&n.parent!==undefined&&pos[n.parent])
     g+=`<line x1="${X(n.parent)}" y1="${Y(n.parent)+R}" x2="${X(i)}" y2="${Y(i)-R}" stroke="#ccd0d6" stroke-width="1.5"/>`; });
@@ -442,9 +443,49 @@ function svgTreeAll(treeData, cmap){
     +`<span><svg width="14" height="14" viewBox="0 0 26 26" style="vertical-align:-2px">${treeNodeShape('resume',13,13,STAGE_COLORS.resume,'')}</svg> ${STAGE_LABELS.resume}</span>`
     +'<span style="color:#c0392b">✗ 虛線框=失敗 trial</span>'
     +'<span style="color:#1f2a44">★ 實線框=全域最佳</span>'
-    +'<span class="muted">節點上方=encoder；下方=primary（test 成績）與變異；游標移到節點看摘要，<b>點擊節點跳出完整結果</b></span>'
+    +`<span class="muted">節點上方=encoder；下方=primary（test 的 ${esc(_PM.name)}）與變異；游標移到節點看摘要，<b>點擊節點跳出完整結果</b></span>`
     +'</div>';
   return h;
+}
+// ---- 本 run 的評估指標 (primary_metric) ---------------------------------
+// 迴圈選優、histogram、曲線最佳點標記全部要跟著它走, 不能寫死成內建複合 score。
+let _PM={name:'score', key:'score', lower:false};
+const PM_DESC={
+  score:'內建複合指標 (f1 + roc_auc + kappa) / 3',
+  accuracy:'正確率', roc_auc:'ROC 曲線下面積 (AUROC)', f1:'F1 (macro)',
+  kappa:"Cohen's kappa", precision:'precision (macro)', recall:'recall (macro)',
+  average_precision:'average precision (macro)', jaccard:'Jaccard (macro)',
+  hamming:'Hamming loss（越小越好）',
+};
+function _setPrimaryMetric(j){
+  _PM={name: j.primary_metric || 'score',
+       key: j.primary_metric_key || j.primary_metric || 'score',
+       lower: !!j.primary_lower_better};
+}
+// primary 的完整說明文字: 指標名 + 定義 (使用者才知道這個數字是什麼)
+function pmLabel(){
+  const d=PM_DESC[_PM.key];
+  const alias=(_PM.name!==_PM.key)?` = ${_PM.key}`:'';
+  return esc(_PM.name)+alias+(d?`（${d}）`:'');
+}
+// 指標曲線的系列: 固定四條 (score/accuracy/roc_auc/f1) + 若 primary_metric 不在其中
+// 就補一條; 最佳點 (best) 只標在 primary_metric 那條 —— 過去寫死標在 score 上, 使用者
+// 選了別的指標時會看到錯的「最佳 epoch」。
+const _METRIC_COLORS={score:'#1a9e5c', accuracy:'#2d6cdf', roc_auc:'#b5179e', f1:'#00838f',
+                      kappa:'#7048e8', precision:'#e8710a', recall:'#0b7285',
+                      average_precision:'#c2255c', jaccard:'#5c940d', hamming:'#868e96'};
+function metricSeries(cv){
+  const vm=cv.val_metrics||{};
+  const pick=k=> (vm[k] && vm[k].length) ? vm[k]
+    : (k==='score'?cv.val_score:(k==='accuracy'?cv.val_accuracy
+      :(k==='roc_auc'?cv.val_roc_auc:(k==='f1'?cv.val_f1:null))));
+  const keys=['score','accuracy','roc_auc','f1'];
+  if(_PM.key && !keys.includes(_PM.key) && (pick(_PM.key)||[]).length) keys.push(_PM.key);
+  return keys.map(k=>{
+    const isPM=(k===_PM.key);
+    return {name: k+(isPM?' ★':''), color:_METRIC_COLORS[k]||'#495057', data:pick(k),
+            best: isPM ? (_PM.lower?'min':'max') : undefined};
+  });
 }
 function trialCard(t, cmap){
   const r=t.recipe, c=encColor(cmap, r.encoder.model_key), hp=r.hparams||{}, prov=r.provenance||{}, cv=t.curves||{};
@@ -464,11 +505,12 @@ function trialCard(t, cmap){
   // 已完成的 trial: primary/metrics 來自最終 test; 進行中的 trial 還沒跑 test, 顯示的是 val 目前最佳
   const split = t.is_running ? 'val' : 'test';
   const note = t.is_running
-    ? '— 目前 <b>val</b> 最佳分數（trial 尚未結束，還沒跑最終 test）'
-    : '— <b>test set</b> 成績：用 val 最佳 checkpoint 在 test 上重跑一次的結果'
+    ? `— 目前 <b>val</b> 的最佳 <b>${esc(_PM.name)}</b>（trial 尚未結束，還沒跑最終 test）`
+    : `— <b>test set</b> 的 <b>${esc(_PM.name)}</b>：用 val 最佳 checkpoint 在 test 上重跑一次的結果`
       + '（下方曲線是逐 epoch 的 <b>val</b>，兩者不同 split，val 通常較高）';
+  // primary 一律標明「是哪個指標」——這個數字就是迴圈選優、histogram 排名用的值
   h+=`<tr><td>primary <span class="muted">(${split})</span></td><td><b>${fmt(t.primary_score)}</b>`
-    +` <span class="muted">${note}</span></td></tr>`;
+    +` <span class="muted">= ${pmLabel()}，即本 run 的評估指標 primary_metric ${note}</span></td></tr>`;
   if(t.metrics && Object.keys(t.metrics).length) h+=`<tr><td>metrics <span class="muted">(${split})</span></td><td class="muted">${esc(JSON.stringify(t.metrics))}</td></tr>`;
   h+='</table>';
   const why=[];
@@ -487,26 +529,33 @@ function trialCard(t, cmap){
   if(why.length) h+='<div class="banner ok" style="margin-top:6px">🧠 決策理由（advisor='+esc(prov.advisor||'?')+'）<br>'+why.map(esc).join('<br>')+'</div>';
   // 曲線一律是「逐 epoch 的 val」; 最終 test (最佳 checkpoint 重跑) 另外標在圖下, 不畫進曲線
   const ft=cv.final_test, ftm=(ft&&ft.metrics)||null;
+  // primary 是「評估指標在 test 上的值」→ 這裡把該指標挑出來標示, 不再寫死說 score 是 primary
+  const pmv = ftm ? ftm[_PM.key] : null;
   const ftLine = ftm
     ? `<div class="muted" style="margin-top:2px">最終 <b>test</b>（用 val 最佳 checkpoint 重跑）：`
-      + `score <b>${fmt(ftm.score)}</b> · accuracy ${fmt(ftm.accuracy)} · roc_auc ${fmt(ftm.roc_auc)} · f1 ${fmt(ftm.f1)}`
-      + (ft.loss!=null?` · loss ${fmt(ft.loss)}`:'') + ' ← 這就是上方的 primary</div>'
+      + (pmv!=null ? `<b>${esc(_PM.name)} ${fmt(pmv)}</b> ← 這就是上方的 primary · ` : '')
+      + `score ${fmt(ftm.score)} · accuracy ${fmt(ftm.accuracy)} · roc_auc ${fmt(ftm.roc_auc)} · f1 ${fmt(ftm.f1)}`
+      + (ft.loss!=null?` · loss ${fmt(ft.loss)}`:'') + '</div>'
     : '';
-  h+='<div class="row" style="margin-top:6px">'
-    +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Loss（train / val · 逐 epoch）</div>'
+  const ms=metricSeries(cv);   // 指標曲線 (★ 標在本 run 的 primary_metric 那條)
+  // 兩張圖靠左排 (flex:0 1 440px + justify-content:flex-start) → 圖表左緣互相對齊、不被撐開
+  h+='<div class="row" style="margin-top:6px;justify-content:flex-start;align-items:flex-start">'
+    +'<div style="flex:0 1 440px;min-width:0;text-align:left"><div class="muted">Loss（train / val · 逐 epoch）</div>'
       +svgLine([{name:'train_loss', color:'#c0392b', data:cv.train_loss},
                 {name:'val_loss',   color:'#e8710a', data:cv.val_loss, best:'min'}])
       +'<div class="muted" style="font-size:11px;margin-top:2px">train 是<b>訓練 criterion</b>（可能含 weighted_ce／label smoothing／mixup，且套用 augmentation·dropout·drop_path）的<b>整個 epoch 平均</b>；val 是 <b>plain CrossEntropy</b>、無擴增、epoch 結束時的快照。兩者<b>算法不同、不可直接比大小</b>——train 高於 val 是正常的，請看各自<b>下降趨勢</b>而非兩者差距。</div>'
       +(ft&&ft.loss!=null?`<div class="muted" style="margin-top:2px">最終 test loss ${fmt(ft.loss)}（未畫入曲線）</div>`:'')
       +'</div>'
-    +'<div style="flex:1 1 300px;min-width:0"><div class="muted">Score / 指標（<b>val</b> · 逐 epoch · 0–1）</div>'
-      +svgLine([{name:'score',    color:'#1a9e5c', data:cv.val_score, best:'max'},
-                {name:'accuracy', color:'#2d6cdf', data:cv.val_accuracy},
-                {name:'roc_auc',  color:'#b5179e', data:cv.val_roc_auc},
-                {name:'f1',       color:'#00838f', data:cv.val_f1}])
+    +'<div style="flex:0 1 440px;min-width:0;text-align:left">'
+      +`<div class="muted">指標（<b>val</b> · 逐 epoch · 0–1）· ★=評估指標 <b>${esc(_PM.name)}</b>，最佳點依它標記</div>`
+      +svgLine(ms)
+      +(ms.some(s=>s.best && (s.data||[]).length)?''
+        :`<div class="muted" style="font-size:11px;margin-top:2px">（評估指標 <b>${esc(_PM.name)}</b> 不在逐 epoch log 內，故未標最佳點；trial 的 primary 仍以它在 test 上計算）</div>`)
       +ftLine+'</div>'
     +'</div>';
-  if(t.cm_img) h+=`<div style="margin-top:6px"><span class="muted">confusion matrix (test)</span><br><img src="${t.cm_img}" style="max-width:260px;border-radius:6px"></div>`;
+  if(t.cm_img) h+=`<div style="margin-top:6px"><span class="muted">confusion matrix (test)</span><br>`
+    +`<img class="zoomable" src="${t.cm_img}" title="點圖片可放大檢視"`
+    +` style="max-width:260px;border-radius:6px;cursor:zoom-in"></div>`;
   return h;
 }
 // ---- 解答樹節點 → 跳出式結果對話框 --------------------------------------
@@ -599,6 +648,8 @@ async function submitResumeFull(){
 }
 document.addEventListener('keydown', e=>{
   if(e.key!=='Escape') return;
+  const zm=document.getElementById('zoom-modal');
+  if(zm && zm.style.display!=='none') return;   // 放大檢視自己會關 (base.html)
   const rf=document.getElementById('resumefull-modal');
   if(rf && rf.style.display!=='none'){ closeResumeFull(); return; }
   const m=document.getElementById('trial-modal');
@@ -607,11 +658,15 @@ document.addEventListener('keydown', e=>{
 });
 // 事件委派: notebook 內容每次輪詢會重繪, 監聽掛在容器上才不會失效
 (function(){
-  const nb=document.getElementById('nb');
-  if(nb) nb.addEventListener('click', e=>{
+  const onNode=e=>{
     const g=e.target.closest ? e.target.closest('g[data-tid]') : null;
     if(g){ const tid=g.getAttribute('data-tid'); if(tid) openTrialModal(tid); }
-  });
+  };
+  const nb=document.getElementById('nb');
+  if(nb) nb.addEventListener('click', onNode);
+  // 放大檢視裡的解答樹節點也要能點開 trial 結果
+  const zm=document.getElementById('zoom-modal');
+  if(zm) zm.addEventListener('click', onNode);
 })();
 // 載入指示: 首次載入 / 切換 run 時顯示 spinner 與頂部進度條 (之後的輪詢靜默更新)
 let _loadedRun=null;
@@ -678,6 +733,8 @@ function renderChatProgress(j, cur){
   }
 }
 // 逐 fold 平行: 父 run 總覽 — 各 fold 的 GPU/狀態/最佳分數 + 點入按鈕
+// 目前是否停在「逐 fold 平行」父層總覽 (供左側「繼續實驗」改走 fleet; null=否)
+let _pfParent=null;
 function renderParentOverview(j){
   const nb=document.getElementById('nb'); if(!nb) return;
   const pf=j.parallel_folds, folds=pf.folds||[];
@@ -690,6 +747,8 @@ function renderParentOverview(j){
   const parentRun=document.getElementById('rs-run').value;
   const maxDone=Math.max(0, ...folds.map(e=>e.n_done||0));
   const maxStale=Math.max(0, ...folds.map(e=>e.stale||0));
+  // 左側「繼續實驗」在這個檢視下等同「繼續全部 fold」(見 resumeRun)
+  _pfParent={run:parentRun, maxTrials:curMax, patience:curPat, maxDone, maxStale};
   let rows=folds.map(e=>{
     const nd=(e.n_done!=null?e.n_done:0);
     const fMax=(e.max_trials!=null?e.max_trials:curMax);   // 該 fold 自己的設定 (可能被單獨續過)
@@ -735,6 +794,8 @@ async function pollRunStatus(){
   catch(e){ _loadbar(false); nb.innerHTML='<div class="banner warn">連線失敗</div>'; return; }
   if(!j.ok){ _loadbar(false); nb.innerHTML='<div class="banner warn">'+(j.error||'錯誤')+'</div>'; return; }
   // 逐 fold 平行: 不論在父層或某個 fold, 都刷新左側選擇器的各 fold 即時狀態
+  _setPrimaryMetric(j);        // 本 run 的評估指標 → 曲線最佳點 / primary 文字說明
+  _pfParent=null;              // 由 renderParentOverview 重新設定 (只在父層總覽為真)
   if(j.parallel_folds) updateFoldSelector(j.parallel_folds);
   else if(onParent) updateFoldSelector(null);
   if(onParent && j.parallel_folds){
@@ -760,7 +821,8 @@ async function pollRunStatus(){
   const histBars=ts=>ts.filter(t=>t.status==='done').map(t=>({
     label:t.trial_id.length>34?'…'+t.trial_id.slice(-32):t.trial_id,
     value:t.primary_score||0, color:encColor(cmap, t.recipe.encoder.model_key)}));
-  html+=cell('結果 histogram（各 trial primary＝test 成績 · 顏色=encoder）','', svgBars(histBars(done)), 'histogram');
+  html+=cell(`結果 histogram（各 trial primary＝test 的 ${_PM.name} · 顏色=encoder）`,
+    `<span class="muted">primary_metric = ${pmLabel()}</span>`, svgBars(histBars(done)), 'histogram');
   if(j.search_tree && Object.keys(j.search_tree).length)
     html+=cell('🌳 解答樹（AIDE 式搜尋：先開滿 draft → 每輪依指標機率選節點 improve/debug/resume）','', svgTreeAll(j.search_tree, cmap), 'tree');
   done.slice().reverse().forEach(t=>{ html+=cell('trial：'+t.trial_id, `<span class="pill ${t.status}">${t.status}</span>`, trialCard(t, cmap), 'trial:'+t.trial_id); });
@@ -970,6 +1032,13 @@ async function stopRun(){
 async function resumeRun(){
   const run={value:effRun()};
   if(!run||!run.value){ alert('請先選一個 run'); return; }
+  // 逐 fold 平行 run 的父層 (fold 選擇器停在「總覽」): 改開「繼續全部 fold」對話框,
+  // 讓使用者能設 max_trials/patience, 並確保走 fleet 而不是循序分 fold。
+  if(_pfParent){
+    openResumeFull(_pfParent.run, _pfParent.maxTrials, _pfParent.patience,
+                   _pfParent.maxDone, _pfParent.maxStale);
+    return;
+  }
   if(!confirm('從上次停止的地方繼續實驗「'+run.value+'」？\n（載入既有 trial 與解答樹後接續下一輪；若已達 max_trials 會立即依停止條件結束）')) return;
   const fd=new FormData(); fd.append('run', run.value);
   try{

@@ -737,7 +737,20 @@ class LoopController:
             pass
 
     def _write_folds_json(self, current: int, entries: list) -> None:
-        """per_fold 索引 (供 UI 分 fold 顯示): 目前 fold + 各 fold 的名稱/解答樹檔/最佳。"""
+        """per_fold 索引 (供 UI 分 fold 顯示): 目前 fold + 各 fold 的名稱/解答樹檔/最佳。
+
+        注意: 若這個 run 目錄已經是『逐 fold 平行』(fold_fleet 寫的 per_fold_parallel
+        manifest, 各 fold 為 run_dir/foldN 子執行), 就不能覆寫 —— 覆寫等於把各 fold
+        子執行從 UI 抹掉 (fold 下拉消失)。這種情況只可能是誤走了循序路徑, 略過即可。
+        """
+        path = os.path.join(self.run_dir, "folds.json")
+        try:
+            if os.path.isfile(path):
+                with open(path, encoding="utf8") as f:
+                    if (json.load(f) or {}).get("mode") == "per_fold_parallel":
+                        return
+        except Exception:
+            pass
         try:
             with open(os.path.join(self.run_dir, "folds.json"), "w",
                       encoding="utf8") as f:
