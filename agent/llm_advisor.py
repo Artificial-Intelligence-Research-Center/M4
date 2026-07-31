@@ -213,13 +213,20 @@ class _NextDecision(_InfoMixin):
                     "已知走不通), 實驗會自動改從樹上其他節點繼續。這不會結束實驗。")
     reason: str = ""
     mutation: Literal[
-        "add_regularizer", "swap_head", "change_augmentation",
+        "add_regularizer", "swap_head", "change_augmentation", "change_loss",
         "add_auxiliary_task", "adjust_hparams", "edit_code", "none",
     ] = "none"
     # 變異內容 (依 mutation 使用其一)
     add_regularizer: Optional[str] = None
     new_head_type: Optional[Literal["linear", "mlp"]] = None
     new_augmentation: Optional[str] = None
+    # mutation="change_loss": 換掉 loss 主體 (例: weighted_ce → cross_entropy)。
+    # 這是改良階段唯一能換 loss 的欄位 — 沒有它, 一條分支的 loss 從 draft 之後
+    # 就再也改不掉 (使用者要求「試 ce 而不是 weighted_ce」時無從落實)。
+    new_loss: Optional[Literal["cross_entropy", "weighted_ce", "focal"]] = Field(
+        default=None,
+        description="mutation=change_loss 時使用: 新的 loss 主體 "
+                    "(cross_entropy / weighted_ce / focal)。")
     # 超參覆寫以 JSON 字串表示 (避免開放 dict 讓 structured-output grammar 過重),
     # 例: '{"blr": 0.001, "drop_path": 0.3}'
     hparam_overrides_json: str = ""
@@ -1122,7 +1129,10 @@ class LLMAdvisor:
               f"訓練結束時 loss 仍明顯下降 → epochs 不足, 應增加; loss 很早就收斂平坦、"
               f"或 val_loss 開始回升 (過擬合) → 應減少 epochs。需要時 mutation=adjust_hparams, "
               f"在 hparam_overrides_json 設 epochs, 並在 reason 依曲線說明增/減的依據; "
-              f"(3) 納入使用者討論, 決定對『變異基準』Recipe 做『一個』正交變異再試; "
+              f"(3) 納入使用者討論, 決定對『變異基準』Recipe 做『一個』正交變異再試 "
+              f"(可用的變異含 mutation=change_loss + new_loss —— 使用者若要求換 loss "
+              f"主體, 例如『試 cross_entropy 而不是 weighted_ce』, 這裡就直接用它落實, "
+              f"不必等新的 draft); "
               f"若這個基準節點本身走不通 (例如凍結特徵無訊號、權重載入不完整), "
               f"設 prune_branch=true 放棄『這條分支』即可 — 實驗會自動改從樹上其他節點"
               f"繼續, 不要因此設 stop; stop=true 專門保留給『所有分支都已收斂 / 使用者"
@@ -1355,6 +1365,10 @@ class LLMAdvisor:
         elif d.mutation == "change_augmentation" and d.new_augmentation:
             r.augmentation = ComponentRef(name=d.new_augmentation)
             prov["mutation"] = f"change_augmentation:{d.new_augmentation}"
+        elif d.mutation == "change_loss" and d.new_loss:
+            old = r.losses[0].name if r.losses else "—"
+            r.losses = [ComponentRef(name=d.new_loss)]
+            prov["mutation"] = f"change_loss:{old}→{d.new_loss}"
         elif d.mutation == "adjust_hparams" and d.hparam_overrides_json:
             try:
                 overrides = json.loads(d.hparam_overrides_json)
