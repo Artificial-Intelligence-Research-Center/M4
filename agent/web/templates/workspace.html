@@ -88,6 +88,9 @@
       {% if not run_names %}<div class="muted" style="margin-top:8px">尚無 run，先在右方開一個完整流程。</div>{% endif %}
       <div id="privacy-bar" style="display:none;margin-top:8px;font-size:11px;padding:5px 8px;
            border-radius:6px;border:1px solid #cfe0fb;background:#f4f8ff"></div>
+      <!-- 總覽（全部 fold）時的提示: 訊息會廣播給每個 fold 子執行 -->
+      <div id="chat-scope" style="display:none;margin-top:8px;font-size:11px;padding:5px 8px;
+           border-radius:6px;border:1px solid #ffe0a3;background:#fff8e6;color:#7a5200"></div>
       <div id="chat-box" data-zoom-target style="height:54vh;overflow-y:auto;border:1px solid #e3e6ea;
            border-radius:8px;padding:10px;background:#fbfcfe;margin-top:8px">
         <div class="muted">開始「完整流程」後，LLM 每輪的檢視與決策會出現在這裡；你可以隨時留言引導。</div>
@@ -735,6 +738,21 @@ function renderChatProgress(j, cur){
 // 逐 fold 平行: 父 run 總覽 — 各 fold 的 GPU/狀態/最佳分數 + 點入按鈕
 // 目前是否停在「逐 fold 平行」父層總覽 (供左側「繼續實驗」改走 fleet; null=否)
 let _pfParent=null;
+// 聊天框的作用範圍提示: 在總覽打的字會廣播給每個 fold (父層本身沒有決策迴圈)
+function _syncChatScope(){
+  const el=document.getElementById('chat-scope'); if(!el) return;
+  const inp=document.getElementById('chat-input');
+  if(_pfParent){
+    const n=(_pfParent.nFolds||0);
+    el.innerHTML='📣 你現在在<b>總覽（全部 fold）</b>：訊息會<b>廣播給'+(n?(' '+n+' 個'):'每個')
+      +' fold</b> 的搜尋（父層本身沒有決策迴圈）。只想對單一 fold 說話，請先用上方 fold 選擇器切過去。';
+    el.style.display='';
+    if(inp) inp.placeholder='輸入問題或指示（會廣播給全部 fold；例：改用 cross_entropy 而不是 weighted_ce）';
+  } else {
+    el.style.display='none';
+    if(inp) inp.placeholder='輸入問題或指示（問答 agent 會立即依實驗資料回答；例：哪個 encoder 最好？改用 focal loss；「停止」=中斷）';
+  }
+}
 function renderParentOverview(j){
   const nb=document.getElementById('nb'); if(!nb) return;
   const pf=j.parallel_folds, folds=pf.folds||[];
@@ -748,7 +766,9 @@ function renderParentOverview(j){
   const maxDone=Math.max(0, ...folds.map(e=>e.n_done||0));
   const maxStale=Math.max(0, ...folds.map(e=>e.stale||0));
   // 左側「繼續實驗」在這個檢視下等同「繼續全部 fold」(見 resumeRun)
-  _pfParent={run:parentRun, maxTrials:curMax, patience:curPat, maxDone, maxStale};
+  _pfParent={run:parentRun, maxTrials:curMax, patience:curPat, maxDone, maxStale,
+             nFolds:folds.length};
+  _syncChatScope();
   let rows=folds.map(e=>{
     const nd=(e.n_done!=null?e.n_done:0);
     const fMax=(e.max_trials!=null?e.max_trials:curMax);   // 該 fold 自己的設定 (可能被單獨續過)
@@ -795,7 +815,7 @@ async function pollRunStatus(){
   if(!j.ok){ _loadbar(false); nb.innerHTML='<div class="banner warn">'+(j.error||'錯誤')+'</div>'; return; }
   // 逐 fold 平行: 不論在父層或某個 fold, 都刷新左側選擇器的各 fold 即時狀態
   _setPrimaryMetric(j);        // 本 run 的評估指標 → 曲線最佳點 / primary 文字說明
-  _pfParent=null;              // 由 renderParentOverview 重新設定 (只在父層總覽為真)
+  _pfParent=null; _syncChatScope();   // 由 renderParentOverview 重新設定 (只在父層總覽為真)
   if(j.parallel_folds) updateFoldSelector(j.parallel_folds);
   else if(onParent) updateFoldSelector(null);
   if(onParent && j.parallel_folds){

@@ -1216,10 +1216,29 @@ def discuss():
     if not run or not os.path.isdir(run_dir) or not text:
         return jsonify({"ok": False, "error": "缺少 run 或 text"}), 400
     convo.append(run_dir, "user", text, kind="user_msg")
+    # 逐 fold 平行的父層沒有決策迴圈 (各 fold 各跑各的 LoopController, 只讀自己目錄的
+    # 對話) → 在總覽打的字原本誰也看不到。這裡廣播給每個 fold 子執行, 讓它們下一輪
+    # review_and_decide 的「討論記錄」都看得到 (QA 回答仍只在父層跑一次)。
+    fanout = []
+    if _is_parallel_parent(run_dir):
+        for ent in (_fold_manifest(run_dir).get("folds") or []):
+            sub = os.path.join(run_dir, ent.get("subdir", ""))
+            if not os.path.isdir(sub):
+                continue
+            try:
+                convo.append(sub, "user", f"【全部 fold 廣播】{text}",
+                             kind="user_msg", broadcast=True)
+                fanout.append(ent.get("subdir"))
+            except Exception:
+                pass
+        if fanout:
+            convo.append(run_dir, "system",
+                         f"（已把這則訊息廣播給 {len(fanout)} 個 fold：{'、'.join(fanout)}；"
+                         f"各 fold 會在下一輪決策時納入）", kind="status")
     # 問答 agent (advisor=llm 時): 背景回答, 不阻塞這個請求; 失敗不影響原流程
     from .. import qa_agent
     qa_agent.answer_async(run_dir, text)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "broadcast": fanout})
 
 
 @app.route("/delete_run", methods=["POST"])
