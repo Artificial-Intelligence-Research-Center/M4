@@ -845,15 +845,65 @@ def resume_full():
     return jsonify({"ok": True, "run": run})
 
 
+def _last_convo_kind(run_dir: str) -> str | None:
+    """該 run 對話的最後一則 kind ('final' = 這個搜尋已自己跑完)。"""
+    p = os.path.join(run_dir, "conversation.jsonl")
+    if not os.path.isfile(p):
+        return None
+    last = None
+    try:
+        with open(p, encoding="utf8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        last = json.loads(line)
+                    except Exception:
+                        pass
+    except OSError:
+        return None
+    return (last or {}).get("kind")
+
+
+def _job_busy(run_dir: str) -> bool:
+    """是否有背景工作 (JOBS) 正在跑這個 run 目錄。"""
+    target = os.path.realpath(run_dir)
+    with _LOCK:
+        return any(os.path.realpath(v.get("run_dir") or "") == target
+                   and v.get("status") in ("queued", "running")
+                   for v in JOBS.values())
+
+
+def _fold_live_status(parent_dir: str, sub: str, stored: str | None) -> str | None:
+    """fold 的『當下』狀態 — folds.json 存的是寫入當時的快照, 會過期。
+
+    單獨續跑某個 fold 是走 /resume_run (JOBS 背景工作, 子執行目錄=sub), 那條路徑
+    不會回頭改父層 manifest → 明明在跑, 總覽卻還停在上次的 failed/finished。
+    這裡改成每次讀取時重新判定: 有背景工作在跑 → running; 對話已收尾 → finished;
+    manifest 說 running 但父層 fleet 也沒在跑 → 是被中斷的 (例: 重啟 server) → failed。
+    """
+    if _job_busy(sub):                       # 單獨續跑這個 fold
+        return "running"
+    if stored in ("running", "queued") and _job_busy(parent_dir):
+        return stored                        # fleet 正在跑, manifest 由它即時維護 → 直接信
+    if _last_convo_kind(sub) == "final":     # 這個 fold 自己跑完了
+        return "finished"
+    if stored == "running":
+        return "failed"                      # manifest 說在跑但沒人在跑 → 被中斷 (例: 重啟)
+    return stored
+
+
 def _enrich_parallel_folds(parent_dir, folds):
     """對每個 fold 子執行即時補上『從 ledger/config 直接算出的』真實狀態 — 不依賴
     folds.json 是否事後存了這些 (舊 run 也正確):
+      status   = 依背景工作/對話收尾即時判定 (見 _fold_live_status)
       n_done   = 已完成 trial 數 (排除 ensemble 偽 trial)
       max_trials/patience/min_delta = 該 fold 自己的 config (可能被單獨續過)
       stale    = 目前連續 improve/resume 無提升的輪數 (重放 ledger; 判斷是否因 patience 停)
     """
     for e in folds:
         sub = os.path.join(parent_dir, e.get("subdir", ""))
+        e["status"] = _fold_live_status(parent_dir, sub, e.get("status"))
         md = 0.0
         try:
             fc = AgentConfig.load(os.path.join(sub, "config.yaml"))
@@ -879,6 +929,11 @@ def _enrich_parallel_folds(parent_dir, folds):
                 if prev is None or t.primary_score > prev:
                     best = t.primary_score
             e["stale"] = stale
+            # primary/best 也即時重算 —— manifest 存的是上次寫入時的快照, 單獨續跑
+            # 某個 fold 期間不會更新 (與 status 同樣的過期問題)
+            if done:
+                bt = max(done, key=lambda t: t.primary_score)
+                e["primary"], e["best"] = bt.primary_score, bt.trial_id
         except Exception:
             e.setdefault("n_done", 0)
     return folds
