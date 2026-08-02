@@ -75,7 +75,8 @@
       <label>目前 run</label>
       <div style="display:flex;gap:6px;align-items:center">
         <select id="rs-run" onchange="onRunChange()" style="flex:1">
-          {% for n in run_names %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
+          {# 選項標籤帶上資料集名稱, 方便從一堆 run_YYYYMMDD_… 中辨識 #}
+          {% for o in run_options %}<option value="{{ o.name }}" title="{{ o.label }}">{{ o.label }}</option>{% endfor %}
         </select>
         <button type="button" onclick="deleteRun()" title="刪除此 run"
           style="margin:0;background:#f4f5f7;color:#c0392b;padding:8px 10px;flex:0 0 auto">🗑</button>
@@ -1080,7 +1081,9 @@ if(_formFull){
       if(j.ok && j.run){
         const sel=document.getElementById('rs-run');
         if(![...sel.options].some(o=>o.value===j.run)){
-          const o=document.createElement('option'); o.value=j.run; o.textContent=j.run; sel.insertBefore(o, sel.firstChild);
+          const o=document.createElement('option'); o.value=j.run;
+          o.textContent=j.label||j.run; o.title=o.textContent;   // 標籤含資料集名稱
+          sel.insertBefore(o, sel.firstChild);
         }
         sel.value=j.run;
         const det=_formFull.closest('details'); if(det) det.open=false;

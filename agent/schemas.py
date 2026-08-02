@@ -204,7 +204,7 @@ class NextAction(BaseModel):
     reason: str = ""
     narrative: str = ""  # LLM 對目前結果的簡短檢視說明 (給使用者看的對話內容)
     mutation: Literal[
-        "add_regularizer", "swap_head", "change_augmentation",
+        "add_regularizer", "swap_head", "change_augmentation", "change_loss",
         "add_auxiliary_task", "adjust_hparams", "edit_code", "none",
     ] = "none"
     next_recipe: Optional[Recipe] = None

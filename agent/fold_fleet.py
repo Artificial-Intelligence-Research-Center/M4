@@ -341,6 +341,17 @@ def run_fleet(cfg: AgentConfig, run_dir: str,
             flush()
             convo.append(parent, "system",
                          f"Fold {i + 1} 失敗：{e}", kind="status")
+            # 也寫進『這個 fold 自己的』對話 —— 否則切到該 fold 只看得到最後一則
+            # 「第 N 輪…請稍候…」, 使用者看不到任何錯誤訊息 (錯誤只留在父層)。
+            try:
+                sub_dir = os.path.join(parent, f"fold{i}")
+                convo.append(sub_dir, "system", f"實驗中止（本 fold 執行失敗）：{e}",
+                             kind="final", error=True)
+                cp = os.path.join(sub_dir, "current_trial.json")
+                if os.path.isfile(cp):
+                    os.remove(cp)             # 清掉殘留的「進行中 trial」卡
+            except Exception:
+                pass
         finally:
             sched.release(device)
 

@@ -107,6 +107,51 @@ def _run_names() -> list[str]:
     return sorted(names, reverse=True)
 
 
+def _run_dataset(run_dir: str) -> str:
+    """這個 run 用的資料集名稱 (供 run 選單辨識)。
+
+    逐 fold 平行/循序的 run, data_path 指到某個 fold 目錄 (…/5_fold_XXX/XXX_seed42_fold0),
+    此時顯示其上層的資料集群組名 (5_fold_XXX) 較好認; 其餘顯示目錄名。
+    """
+    dp, agg = "", ""
+    cp = os.path.join(run_dir, "config.yaml")
+    if os.path.isfile(cp):
+        try:
+            import yaml
+            with open(cp, encoding="utf8") as fh:
+                d = yaml.safe_load(fh) or {}
+            dp = str(d.get("data_path") or "").rstrip("/")
+            agg = str(((d.get("eval") or {}).get("aggregation")) or "")
+        except Exception:
+            dp = ""
+    if not dp:      # 舊版單一 trial 的 run 沒有 config.yaml → 退回 dataset_profile
+        pp = os.path.join(run_dir, "dataset_profile.json")
+        if os.path.isfile(pp):
+            try:
+                with open(pp, encoding="utf8") as fh:
+                    dp = str((json.load(fh) or {}).get("root") or "").rstrip("/")
+            except Exception:
+                dp = ""
+    if not dp:
+        return ""
+    name = os.path.basename(dp)
+    if m := re.search(r"_fold(\d+)$", name):       # sibling fold → 用群組名
+        group = os.path.basename(os.path.dirname(dp)) or name
+        # per_fold 會跑遍所有 sibling fold; 其餘只跑 data_path 指到的那一個
+        return group if agg == "per_fold" else f"{group} fold{m.group(1)}"
+    return name
+
+
+def _run_options() -> list[dict]:
+    """run 選單用: [{name, dataset, label}]，label = 「<run> · <資料集>」。"""
+    out = []
+    for n in _run_names():
+        ds = _run_dataset(os.path.join(_RUNS, n))
+        out.append({"name": n, "dataset": ds,
+                    "label": f"{n} · {ds}" if ds else n})
+    return out
+
+
 def _dataset_ctx() -> dict:
     """資料集選擇器要用的 context: 分組清單 + 預設選取路徑。"""
     groups = dsreg.groups(_DATA)
@@ -295,7 +340,7 @@ def index():
         nav="workspace", route_seg="",
         presets=presets_mod.names(),
         advisors=["llm", "heuristic", "skill"],   # llm 為預設 (下拉第一個)
-        run_names=_run_names(),
+        run_names=_run_names(), run_options=_run_options(),
         modalities=_MODALITIES, anatomies=_ANATOMIES,
         settings=app_settings.load(),   # 表單預設值取自整體設定
         primary_metrics=app_settings.PRIMARY_METRICS,
@@ -313,7 +358,7 @@ def experiments():
         encoders=[c.model_dump() for c in reg.all_cards(include_unavailable=True)],
         available_keys=[c.model_key for c in reg.available_cards()],
         presets=presets_mod.names(),
-        run_names=_run_names(),
+        run_names=_run_names(), run_options=_run_options(),
         primary_metrics=app_settings.PRIMARY_METRICS,
         **_dataset_ctx(),
     )
@@ -646,13 +691,16 @@ def run_full():
                                     trace=traceback.format_exc())
             # 把錯誤寫進對話, 讓工作台聊天框直接看到 (例: advisor=llm 環境不對)
             try:
-                convo.append(run_dir, "system", f"實驗失敗：{e}", kind="final")
+                convo.append(run_dir, "system", f"實驗失敗：{e}", kind="final", error=True)
             except Exception:
                 pass
 
     threading.Thread(target=_worker, args=(), daemon=True).start()
     if f.get("ajax"):
-        return jsonify({"ok": True, "run": run_name})
+        # label 帶資料集名稱, 讓前端新插入的選項與伺服器渲染的一致
+        ds = _run_dataset(run_dir)
+        return jsonify({"ok": True, "run": run_name,
+                        "label": f"{run_name} · {ds}" if ds else run_name})
     return redirect(request.referrer or ".")
 
 
@@ -759,7 +807,7 @@ def resume_run():
                 JOBS[job_id].update(status="failed", message=str(e),
                                     trace=traceback.format_exc())
             try:
-                convo.append(run_dir, "system", f"繼續實驗失敗：{e}", kind="final")
+                convo.append(run_dir, "system", f"繼續實驗失敗：{e}", kind="final", error=True)
             except Exception:
                 pass
 
@@ -837,7 +885,7 @@ def resume_full():
                 JOBS[job_id].update(status="failed", message=str(e),
                                     trace=traceback.format_exc())
             try:
-                convo.append(run_dir, "system", f"繼續失敗：{e}", kind="final")
+                convo.append(run_dir, "system", f"繼續失敗：{e}", kind="final", error=True)
             except Exception:
                 pass
 
@@ -845,8 +893,8 @@ def resume_full():
     return jsonify({"ok": True, "run": run})
 
 
-def _last_convo_kind(run_dir: str) -> str | None:
-    """該 run 對話的最後一則 kind ('final' = 這個搜尋已自己跑完)。"""
+def _last_convo_entry(run_dir: str) -> dict | None:
+    """該 run 對話的最後一則 (kind='final' = 已收尾; error=True = 收尾是因為失敗)。"""
     p = os.path.join(run_dir, "conversation.jsonl")
     if not os.path.isfile(p):
         return None
@@ -862,7 +910,7 @@ def _last_convo_kind(run_dir: str) -> str | None:
                         pass
     except OSError:
         return None
-    return (last or {}).get("kind")
+    return last if isinstance(last, dict) else None
 
 
 def _job_busy(run_dir: str) -> bool:
@@ -879,15 +927,17 @@ def _fold_live_status(parent_dir: str, sub: str, stored: str | None) -> str | No
 
     單獨續跑某個 fold 是走 /resume_run (JOBS 背景工作, 子執行目錄=sub), 那條路徑
     不會回頭改父層 manifest → 明明在跑, 總覽卻還停在上次的 failed/finished。
-    這裡改成每次讀取時重新判定: 有背景工作在跑 → running; 對話已收尾 → finished;
-    manifest 說 running 但父層 fleet 也沒在跑 → 是被中斷的 (例: 重啟 server) → failed。
+    這裡改成每次讀取時重新判定: 有背景工作在跑 → running; 對話已收尾 → finished
+    (收尾訊息帶 error=True 則是失敗); manifest 說 running 但父層 fleet 也沒在跑 →
+    是被中斷的 (例: 重啟 server) → failed。
     """
     if _job_busy(sub):                       # 單獨續跑這個 fold
         return "running"
     if stored in ("running", "queued") and _job_busy(parent_dir):
         return stored                        # fleet 正在跑, manifest 由它即時維護 → 直接信
-    if _last_convo_kind(sub) == "final":     # 這個 fold 自己跑完了
-        return "finished"
+    last = _last_convo_entry(sub) or {}
+    if last.get("kind") == "final":          # 這個 fold 自己收尾了
+        return "failed" if last.get("error") else "finished"
     if stored == "running":
         return "failed"                      # manifest 說在跑但沒人在跑 → 被中斷 (例: 重啟)
     return stored

@@ -57,7 +57,7 @@
       <div>
         <label>選擇 run</label>
         <select id="prog-run" onchange="pollProgress()">
-          {% for n in run_names %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
+          {% for o in run_options %}<option value="{{ o.name }}" title="{{ o.label }}">{{ o.label }}</option>{% endfor %}
         </select>
       </div>
       <div style="flex:0 0 auto">

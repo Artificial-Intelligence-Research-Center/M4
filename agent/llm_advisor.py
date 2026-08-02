@@ -1288,9 +1288,14 @@ class LLMAdvisor:
         except Exception:
             overrides = {}
         for k, v in overrides.items():
-            if hasattr(r.hparams, k):
+            if k == "loss" and v in ("cross_entropy", "weighted_ce", "focal"):
+                r.losses = [ComponentRef(name=v)]   # 同 improve: loss 導向換 loss 主體
+                changes.append(f"loss={v}")
+            elif hasattr(r.hparams, k):
                 changes.append(f"{k}={v}")
                 setattr(r.hparams, k, v)
+            else:
+                changes.append(f"{k}（未支援, 忽略）")
         if d.loss_name and (not r.losses or r.losses[0].name != d.loss_name):
             r.losses = [ComponentRef(name=d.loss_name)]
             changes.append(f"loss={d.loss_name}")
@@ -1374,10 +1379,25 @@ class LLMAdvisor:
                 overrides = json.loads(d.hparam_overrides_json)
             except Exception:
                 overrides = {}
+            # 只記『真的套用了』的鍵。以前是 `if hasattr(hparams, k)` 靜默丟棄其餘,
+            # 但 provenance 仍寫成套用了 → LLM 下一輪讀回歷史會以為換過 loss
+            # (實際沒換), 於是堅持「已經試過」而不再嘗試。loss 是最常見的一個,
+            # 直接導向換 loss 主體; 其餘不認識的鍵照實記成『忽略』。
+            applied, ignored = {}, {}
             for k, v in overrides.items():
-                if hasattr(r.hparams, k):
+                if k == "loss" and v in ("cross_entropy", "weighted_ce", "focal"):
+                    old = r.losses[0].name if r.losses else "—"
+                    r.losses = [ComponentRef(name=v)]
+                    applied["loss"] = f"{old}→{v}"
+                elif hasattr(r.hparams, k):
                     setattr(r.hparams, k, v)
-            prov["mutation"] = f"adjust_hparams:{overrides}"
+                    applied[k] = v
+                else:
+                    ignored[k] = v
+            prov["mutation"] = (f"adjust_hparams:{applied}"
+                                + (f"（未支援而忽略:{ignored}）" if ignored else ""))
+            if ignored:
+                prov["ignored_overrides"] = ignored
         r.provenance = prov
         return r
 
