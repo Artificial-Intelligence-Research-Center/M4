@@ -3,12 +3,49 @@ model/
 output_dir/
 output_logs/
 data/
+
+# Local model weights and experiment outputs
+baseline_models/
+HK_sft_models_0630/
+dinov2_vitb14_ours/
+gastroscopy_data_size_exp/
+gastroscopy_dinov3_base_0623/
+odir_SFT_models_0716/
+odir_SFT_models_DFT_0716/
+clean_experimental_results/
+dataset_fold_split/
+analysis/analysis/
+analysis/analysis_results/
+dinov2_base_low_dap/
+dinov2_base/
+dinov2_base_ours/
+dinov3_base/
+gastroscopy_baseline/
+sft_checkpoints_0625/
+
+
 # Checkpoints
 *.pth
 *.pt
-# Logs*.log
+
+# Logs
 *.log
+**/logs/
+
 # Tensorboard logs
 runs/
 
+# Python caches and local environments
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Editor and OS metadata
+.idea/
+.vscode/
+.DS_Store

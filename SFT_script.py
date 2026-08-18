@@ -8,13 +8,16 @@ import GPUtil
 SFT_FOLDERS = [
     # "baseline_models",
     # "sft_imagenet_models"
-    "imagenet_sft_models_0430"
+    # "imagenet_sft_models_0430"
+    # "redo_SFT_0601"
+    "odir_SFT_models_0716"
 ]
 
 
 SFT_DATASET = [
-    "SFT_AOD",
-    # "imagenet"
+    # "SFT_AOD",
+    # "imagenet",
+    "odir",
 ]
 
 
@@ -22,7 +25,7 @@ CLASS_MAP = {
     "APTOS2019": "5", "MESSIDOR2": "5", "IDRiD_data": "5",
     "Glaucoma_fundus": "3", "PAPILA": "3", "Retina": "4",
     "MIL": "2", "SL": "2", "HK": "23", "SFT_AOD": "8",
-    "imagenet": "1000",
+    "imagenet": "1000", "odir": "8"
 }
 
 
@@ -95,24 +98,25 @@ def get_model_info(model_path):
     elif "mae" in model_path.lower():
         return "MAE", "MAE"
     elif "vit_large_patch16" in model_path.lower():
-        return "MAE", "MAE"
+        return "SL_VIT", "SL_VIT"
     else:
         raise ValueError(f"無法解析模型資訊: {model_path}")
+        
 
 if __name__ == "__main__":
-    output_dir = "test"
+    output_dir = "odir_SFT_models_0716"
 
     # 0. 先收集所有模型檔案
     sft_models = []
-    # sft_models.extend(
-    #     [
-    #         'RETFound_mae_natureCFP',
-    #         'RETFound_mae_meh',
-    #         'RETFound_mae_shanghai',
-    #         'RETFound_dinov2_meh',
-    #         'RETFound_dinov2_shanghai'
-    #     ]
-    # )
+    sft_models.extend(
+        [
+            # 'RETFound_mae_natureCFP',
+            # 'RETFound_mae_meh',
+            # 'RETFound_mae_shanghai',
+            'RETFound_dinov2_meh',
+            # 'RETFound_dinov2_shanghai'
+        ]
+    )
     for path in SFT_FOLDERS:
         model_ckpts = [f for f in os.listdir(path) if f.endswith(".pth")]
         sft_models.extend([os.path.join(path, ckpt) for ckpt in model_ckpts])
