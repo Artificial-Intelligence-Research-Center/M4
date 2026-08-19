@@ -21,7 +21,10 @@ from huggingface_hub import hf_hub_download, login  # login imported as in origi
 
 # =========================
 import models_vit as models
-from lora import inject_lora, mark_only_lora_and_head_trainable, parse_lora_targets
+from lora import (
+    find_lora_module_ranks, inject_lora, inject_lora_from_state_dict,
+    mark_only_lora_and_head_trainable, parse_lora_targets,
+)
 import util.lr_decay as lrd
 import util.misc as misc
 from util.datasets import build_dataset
@@ -226,6 +229,9 @@ def main(args, criterion):
             args=args,
         )
 
+    checkpoint_has_lora = False
+    lora_injected = False
+
     # ---- Load pre-trained weights (if requested and not eval-only)
     if args.finetune and not args.eval:
         print(f"Preparing to load pre-trained weights: {args.finetune}")
@@ -254,10 +260,10 @@ def main(args, criterion):
         # else:  # RETFound_mae
         #     checkpoint_model = checkpoint["model"]
 
-        if args.model == "RETFound_dinov2" or args.model == "GastroNet":
-            checkpoint_model = checkpoint["teacher"]
-        elif 'model' in checkpoint:
+        if 'model' in checkpoint:
             checkpoint_model = checkpoint["model"]
+        elif (args.model == "RETFound_dinov2" or args.model == "GastroNet") and 'teacher' in checkpoint:
+            checkpoint_model = checkpoint["teacher"]
         else:  # RETFound_mae
             checkpoint_model = checkpoint
 
@@ -268,6 +274,39 @@ def main(args, criterion):
         if args.model in ["MAE", "Pixio", "GastroNet"]:
             checkpoint_model = {k.replace("norm.weight", "fc_norm.weight"): v for k, v in checkpoint_model.items()}
             checkpoint_model = {k.replace("norm.bias", "fc_norm.bias"): v for k, v in checkpoint_model.items()}
+
+        # -- Rebuild checkpoint LoRA modules before loading their tensors
+        lora_module_ranks = find_lora_module_ranks(checkpoint_model)
+        if lora_module_ranks:
+            checkpoint_has_lora = True
+            checkpoint_args = checkpoint.get("args") if isinstance(checkpoint, dict) else None
+            if isinstance(checkpoint_args, dict):
+                checkpoint_alpha = checkpoint_args.get("lora_alpha")
+                checkpoint_dropout = checkpoint_args.get("lora_dropout")
+            else:
+                checkpoint_alpha = getattr(checkpoint_args, "lora_alpha", None)
+                checkpoint_dropout = getattr(checkpoint_args, "lora_dropout", None)
+            if checkpoint_alpha is None:
+                checkpoint_alpha = float(next(iter(lora_module_ranks.values())))
+                print(
+                    "[LoRA] Warning: checkpoint has no saved lora_alpha; "
+                    "using alpha=rank (scaling=1)."
+                )
+            if checkpoint_dropout is None:
+                checkpoint_dropout = 0.0
+            replaced_modules = inject_lora_from_state_dict(
+                model,
+                lora_module_ranks,
+                alpha=checkpoint_alpha,
+                dropout=checkpoint_dropout,
+            )
+            lora_injected = True
+            ranks_summary = sorted(set(lora_module_ranks.values()))
+            print(
+                f"[LoRA] Detected LoRA checkpoint and restored {len(replaced_modules)} module(s); "
+                f"rank(s)={ranks_summary}, alpha={checkpoint_alpha}, dropout={checkpoint_dropout}."
+            )
+            print("[LoRA] Current CLI LoRA settings are ignored for this checkpoint.")
 
         # -- Remove classifier if shape mismatched
         state_dict = model.state_dict()
@@ -280,14 +319,23 @@ def main(args, criterion):
         interpolate_pos_embed(model, checkpoint_model)
 
         # -- Load backbone weights (non-strict)
-        _ = model.load_state_dict(checkpoint_model, strict=False)
+        load_result = model.load_state_dict(checkpoint_model, strict=False)
+        if checkpoint_has_lora:
+            unloaded_lora = [
+                key for key in (*load_result.missing_keys, *load_result.unexpected_keys)
+                if ".lora_A" in key or ".lora_B" in key
+            ]
+            if unloaded_lora:
+                raise RuntimeError(
+                    "Failed to restore all LoRA checkpoint tensors: " + ", ".join(unloaded_lora)
+                )
 
         # -- Re-init head
         if hasattr(model, "head") and hasattr(model.head, "weight"):
             trunc_normal_(model.head.weight, std=2e-5)
 
     # ---- Inject LoRA before loading a LoRA resume/eval checkpoint
-    if args.adaptation == "lora":
+    if args.adaptation == "lora" and not lora_injected:
         targets = parse_lora_targets(args.lora_target)
         replaced_modules = inject_lora(
             model,
@@ -411,7 +459,11 @@ def main(args, criterion):
     model_without_ddp = model
 
     # ---- Adaptation toggle
-    if args.adaptation == "lp":
+    if checkpoint_has_lora and args.adaptation != "lora":
+        for param in model.parameters():
+            param.requires_grad = True
+        print("[Adaptation] LoRA checkpoint retained; training all model parameters.")
+    elif args.adaptation == "lp":
         for name, param in model.named_parameters():
             param.requires_grad = ("head" in name)
         print("[Adaptation] Linear probe: training classifier head only.")
