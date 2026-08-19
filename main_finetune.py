@@ -21,6 +21,7 @@ from huggingface_hub import hf_hub_download, login  # login imported as in origi
 
 # =========================
 import models_vit as models
+from lora import inject_lora, mark_only_lora_and_head_trainable, parse_lora_targets
 import util.lr_decay as lrd
 import util.misc as misc
 from util.datasets import build_dataset
@@ -31,6 +32,27 @@ from engine_finetune import train_one_epoch, evaluate
 # =========================
 faulthandler.enable()
 warnings.simplefilter(action="ignore", category=FutureWarning)
+
+
+def positive_int(value):
+    value = int(value)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return value
+
+
+def positive_float(value):
+    value = float(value)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return value
+
+
+def dropout_float(value):
+    value = float(value)
+    if not 0.0 <= value < 1.0:
+        raise argparse.ArgumentTypeError("must be in [0, 1)")
+    return value
 
 
 def get_args_parser():
@@ -88,8 +110,16 @@ def get_args_parser():
     # ---- Finetuning & adaptation
     parser.add_argument("--finetune", default="", type=str, help="Checkpoint id/path (see model rules below)")
     parser.add_argument("--task", default="", type=str, help="Task name for logging/output grouping")
-    parser.add_argument("--adaptation", default="finetune", choices=["finetune", "lp"],
-                        help="Adaptation strategy: finetune=full fine-tune, lp=linear probe (train head only)")
+    parser.add_argument("--adaptation", default="finetune", choices=["finetune", "lp", "lora"],
+                        help="Adaptation strategy: full fine-tune, linear probe, or LoRA")
+    parser.add_argument("--lora_rank", default=8, type=positive_int,
+                        help="Rank of each LoRA update")
+    parser.add_argument("--lora_alpha", default=16.0, type=positive_float,
+                        help="LoRA scaling factor")
+    parser.add_argument("--lora_dropout", default=0.05, type=dropout_float,
+                        help="Dropout applied to the LoRA branch")
+    parser.add_argument("--lora_target", default="qkv", type=str,
+                        help="Comma-separated linear module names to adapt (default: qkv)")
 
     # ---- Dataset & paths
     parser.add_argument("--data_path", default="./data/", type=str)
@@ -256,6 +286,28 @@ def main(args, criterion):
         if hasattr(model, "head") and hasattr(model.head, "weight"):
             trunc_normal_(model.head.weight, std=2e-5)
 
+    # ---- Inject LoRA before loading a LoRA resume/eval checkpoint
+    if args.adaptation == "lora":
+        targets = parse_lora_targets(args.lora_target)
+        replaced_modules = inject_lora(
+            model,
+            targets=targets,
+            rank=args.lora_rank,
+            alpha=args.lora_alpha,
+            dropout=args.lora_dropout,
+        )
+        if not replaced_modules:
+            raise ValueError(
+                f"No nn.Linear modules matching LoRA target(s) {list(targets)} "
+                f"were found in model '{args.model}' (architecture '{args.model_arch}')."
+            )
+        print(
+            f"[LoRA] Injected {len(replaced_modules)} module(s); "
+            f"rank={args.lora_rank}, alpha={args.lora_alpha}, "
+            f"dropout={args.lora_dropout}, targets={list(targets)}"
+        )
+        print(f"[LoRA] Replaced modules: {', '.join(replaced_modules)}")
+
     # ---- Datasets & samplers
     dataset_train = build_dataset(is_train="train", args=args)
     dataset_val   = build_dataset(is_train="val",   args=args)
@@ -345,7 +397,15 @@ def main(args, criterion):
     if args.resume and args.eval:
         checkpoint = torch.load(args.resume, map_location="cpu")
         print(f"Load checkpoint for eval from: {args.resume}")
-        model.load_state_dict(checkpoint["model"])
+        try:
+            model.load_state_dict(checkpoint["model"])
+        except RuntimeError as error:
+            if args.adaptation == "lora":
+                raise RuntimeError(
+                    "Unable to load the LoRA checkpoint. Ensure --lora_rank, "
+                    "--lora_alpha, --lora_dropout, and --lora_target match the training run."
+                ) from error
+            raise
 
     model.to(device)
     model_without_ddp = model
@@ -355,12 +415,20 @@ def main(args, criterion):
         for name, param in model.named_parameters():
             param.requires_grad = ("head" in name)
         print("[Adaptation] Linear probe: training classifier head only.")
+    elif args.adaptation == "lora":
+        mark_only_lora_and_head_trainable(model)
+        print("[Adaptation] LoRA: training LoRA parameters and classifier head only.")
     else:
         print("[Adaptation] Full fine-tuning: training all parameters.")
 
     # ---- Count trainable params
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_parameters = sum(p.numel() for p in model.parameters())
     print(f"number of trainable params (M): {n_parameters / 1.e6:.2f}")
+    print(
+        f"trainable params: {n_parameters:,} / {total_parameters:,} "
+        f"({100.0 * n_parameters / total_parameters:.4f}%)"
+    )
 
     # ---- LR scaling by effective batch size
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
@@ -374,7 +442,7 @@ def main(args, criterion):
     # ---- DDP (if available)
     if args.distributed and torch.cuda.device_count() > 1:
         ddp_kwargs = {}
-        if args.adaptation == "lp":
+        if args.adaptation in ("lp", "lora"):
             ddp_kwargs["find_unused_parameters"] = True
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.gpu], **ddp_kwargs
