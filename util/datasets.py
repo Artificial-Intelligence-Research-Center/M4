@@ -1,5 +1,7 @@
 import os
+import pandas as pd
 import torch
+from PIL import Image
 from torch.utils.data import Subset
 from torchvision import datasets, transforms
 from timm.data import create_transform
@@ -13,11 +15,87 @@ class ImageFolderWithPath(datasets.ImageFolder):
         return image, label, path
 
 
+class MultiLabelDataset(torch.utils.data.Dataset):
+    """Image dataset backed by a CSV containing one binary column per class."""
+
+    def __init__(self, manifest, image_root, transform, image_column="image_path", classes=None):
+        self.manifest = manifest
+        self.image_root = image_root
+        self.transform = transform
+        frame = pd.read_csv(manifest)
+        if image_column not in frame.columns:
+            raise ValueError(f"Missing image column '{image_column}' in {manifest}")
+
+        self.classes = list(classes) if classes else [c for c in frame.columns if c != image_column]
+        if not self.classes:
+            raise ValueError(f"No label columns found in {manifest}")
+        missing = [column for column in self.classes if column not in frame.columns]
+        if missing:
+            raise ValueError(f"Missing label columns in {manifest}: {missing}")
+
+        labels = frame[self.classes].apply(pd.to_numeric, errors="raise")
+        values = labels.to_numpy(dtype="float32").copy()
+        if not ((values == 0) | (values == 1)).all():
+            raise ValueError(f"Multi-label columns in {manifest} must contain only 0 or 1")
+
+        self.paths = frame[image_column].astype(str).tolist()
+        self.targets = torch.from_numpy(values)
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, index):
+        path = self.paths[index]
+        if not os.path.isabs(path):
+            path = os.path.join(self.image_root, path)
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            if self.transform is not None:
+                image = self.transform(image)
+        return image, self.targets[index], path
+
+
+def get_dataset_classes(dataset):
+    if isinstance(dataset, Subset):
+        return dataset.dataset.classes
+    return dataset.classes
+
+def resolve_multilabel_manifest(split, args):
+    manifest = args.multilabel_manifest.format(split=split)
+    return manifest if os.path.isabs(manifest) else os.path.join(args.data_path, manifest)
+
+
+def dataset_exists(split, args):
+    if args.classification_type == "multi_label":
+        return os.path.isfile(resolve_multilabel_manifest(split, args))
+    return os.path.isdir(os.path.join(args.data_path, split))
+
+
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
-    root = os.path.join(args.data_path, is_train)
-    # dataset = datasets.ImageFolder(root, transform=transform)
-    dataset = ImageFolderWithPath(root, transform=transform)
+    if args.classification_type == "multi_label":
+        manifest = resolve_multilabel_manifest(is_train, args)
+        classes = [item.strip() for item in args.multilabel_classes.split(",") if item.strip()]
+        if args.multilabel_image_root:
+            image_root = args.multilabel_image_root
+            if not os.path.isabs(image_root):
+                image_root = os.path.join(args.data_path, image_root)
+        else:
+            image_root = args.data_path
+        dataset = MultiLabelDataset(
+            manifest=manifest,
+            image_root=image_root,
+            transform=transform,
+            image_column=args.multilabel_image_column,
+            classes=classes or None,
+        )
+        if len(dataset.classes) != args.nb_classes:
+            raise ValueError(
+                f"{manifest} defines {len(dataset.classes)} classes, but --nb_classes={args.nb_classes}"
+            )
+    else:
+        root = os.path.join(args.data_path, is_train)
+        dataset = ImageFolderWithPath(root, transform=transform)
 
     if is_train == 'train':
         ratio = float(getattr(args, "dataratio", 1.0))

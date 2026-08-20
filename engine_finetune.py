@@ -16,6 +16,7 @@ from sklearn.metrics import (
 from pycm import ConfusionMatrix
 import util.misc as misc
 import util.lr_sched as lr_sched
+from multilabel import evaluate_multilabel
 
 def train_one_epoch(
     model: torch.nn.Module,
@@ -45,11 +46,18 @@ def train_one_epoch(
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
         
         samples, targets = samples.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+        if args.classification_type == "multi_label":
+            targets = targets.float()
         if mixup_fn:
             samples, targets = mixup_fn(samples, targets)
         
         with torch.cuda.amp.autocast():
             outputs = model(samples)
+            if args.classification_type == "multi_label" and outputs.shape != targets.shape:
+                raise ValueError(
+                    f"Multi-label logits shape {tuple(outputs.shape)} does not match "
+                    f"target shape {tuple(targets.shape)}"
+                )
             loss = criterion(outputs, targets)
         loss_value = loss.item()
         loss /= accum_iter
@@ -85,6 +93,10 @@ def train_one_epoch(
 @torch.no_grad()
 def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_writer):
     """Evaluate the model."""
+    if args.classification_type == "multi_label":
+        return evaluate_multilabel(
+            data_loader, model, device, args, epoch, mode, num_class, log_writer
+        )
     criterion = nn.CrossEntropyLoss()
     metric_logger = misc.MetricLogger(delimiter="  ")
     os.makedirs(os.path.join(args.output_dir, args.task), exist_ok=True)

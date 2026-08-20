@@ -27,7 +27,7 @@ from lora import (
 )
 import util.lr_decay as lrd
 import util.misc as misc
-from util.datasets import build_dataset
+from util.datasets import build_dataset, dataset_exists, get_dataset_classes
 from util.pos_embed import interpolate_pos_embed
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from engine_finetune import train_one_epoch, evaluate
@@ -55,6 +55,13 @@ def dropout_float(value):
     value = float(value)
     if not 0.0 <= value < 1.0:
         raise argparse.ArgumentTypeError("must be in [0, 1)")
+    return value
+
+
+def probability_float(value):
+    value = float(value)
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError("must be in [0, 1]")
     return value
 
 
@@ -129,6 +136,17 @@ def get_args_parser():
     parser.add_argument("--nb_classes", default=8, type=int)
     parser.add_argument("--output_dir", default="./output_dir")
     parser.add_argument("--log_dir", default="./output_logs")
+    parser.add_argument("--classification_type", default="single_label",
+                        choices=["single_label", "multi_label"])
+    parser.add_argument("--multilabel_threshold", default=0.5, type=probability_float,
+                        help="Sigmoid threshold for multi-label predictions")
+    parser.add_argument("--multilabel_manifest", default="{split}.csv", type=str,
+                        help="Manifest relative to data_path; {split} becomes train/val/test/final_val")
+    parser.add_argument("--multilabel_image_column", default="image_path", type=str)
+    parser.add_argument("--multilabel_classes", default="", type=str,
+                        help="Comma-separated label columns; empty means all non-image columns")
+    parser.add_argument("--multilabel_image_root", default="", type=str,
+                        help="Image root relative to data_path; empty uses data_path")
 
     # >>> NEW: training data efficiency <<<
     parser.add_argument(
@@ -180,6 +198,27 @@ def main(args, criterion):
         print(f"Load checkpoint (args) from: {args.resume}")
         args = checkpoint["args"]
         args.resume = resume_path
+    if not hasattr(args, "classification_type"):
+        args.classification_type = "single_label"
+
+    if args.classification_type == "multi_label":
+        disabled = []
+        if args.mixup > 0 or args.cutmix > 0 or args.cutmix_minmax is not None:
+            disabled.append("Mixup/CutMix")
+        if args.smoothing != 0:
+            disabled.append("label smoothing")
+        if args.stratified:
+            disabled.append("single-label stratified subsampling")
+        args.mixup = 0.0
+        args.cutmix = 0.0
+        args.cutmix_minmax = None
+        args.smoothing = 0.0
+        args.stratified = False
+        if disabled:
+            print(f"[Multi-label] Disabled incompatible settings: {', '.join(disabled)}")
+        criterion = torch.nn.BCEWithLogitsLoss()
+    else:
+        criterion = torch.nn.CrossEntropyLoss()
 
     # ---- Distributed setup
     misc.init_distributed_mode(args)
@@ -360,8 +399,15 @@ def main(args, criterion):
     dataset_train = build_dataset(is_train="train", args=args)
     dataset_val   = build_dataset(is_train="val",   args=args)
     dataset_test  = build_dataset(is_train="test",  args=args)
-    if os.path.exists(os.path.join(args.data_path, "final_val")):
+    train_classes = get_dataset_classes(dataset_train)
+    for split_name, split_dataset in (("val", dataset_val), ("test", dataset_test)):
+        if get_dataset_classes(split_dataset) != train_classes:
+            raise ValueError(f"Class columns/order for {split_name} do not match train")
+    has_final_val = dataset_exists("final_val", args)
+    if has_final_val:
         dataset_final_val = build_dataset(is_train="final_val", args=args)
+        if get_dataset_classes(dataset_final_val) != train_classes:
+            raise ValueError("Class columns/order for final_val do not match train")
 
     num_tasks   = misc.get_world_size()
     global_rank = misc.get_rank()
@@ -377,13 +423,13 @@ def main(args, criterion):
             sampler_val = torch.utils.data.DistributedSampler(
                 dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
-            if os.path.exists(os.path.join(args.data_path, "final_val")):
+            if has_final_val:
                 sampler_final_val = torch.utils.data.DistributedSampler(
                     dataset_final_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
                 )
         else:
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-            if os.path.exists(os.path.join(args.data_path, "final_val")):
+            if has_final_val:
                 sampler_final_val = torch.utils.data.SequentialSampler(dataset_final_val)
 
     if args.dist_eval:
@@ -417,7 +463,7 @@ def main(args, criterion):
             pin_memory=args.pin_mem, drop_last=False,
         )
 
-        if os.path.exists(os.path.join(args.data_path, "final_val")):
+        if has_final_val:
             data_loader_final_val = torch.utils.data.DataLoader(
                 dataset_final_val, sampler=sampler_final_val,
                 batch_size=args.batch_size, num_workers=args.num_workers,
@@ -542,7 +588,7 @@ def main(args, criterion):
     # =========================
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    max_score = 0.0
+    max_score = float("-inf")
     best_epoch = 0
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -561,18 +607,30 @@ def main(args, criterion):
             num_class=args.nb_classes, log_writer=log_writer
         )
 
-        if max_score < val_score or args.SFT:
-            max_score = val_score
-            best_epoch = epoch
-            if args.SFT:
-                csv_path = os.path.join(args.output_dir, args.task, f'predictions_epoch_{epoch}.csv')
-            else:
-                csv_path = os.path.join(args.output_dir, args.task, f'predictions_val.csv')
-            pred_outputs.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        is_best = val_score > max_score
+        output_task_dir = os.path.join(args.output_dir, args.task)
+        os.makedirs(output_task_dir, exist_ok=True)
+
+        if args.SFT:
+            epoch_csv_path = os.path.join(output_task_dir, f"predictions_epoch_{epoch}.csv")
+            pred_outputs.to_csv(epoch_csv_path, index=False, encoding="utf-8-sig")
             if args.output_dir and args.savemodel:
                 misc.save_model(
                     args=args, model=model, model_without_ddp=model_without_ddp,
-                    optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch, mode="best", SFT=args.SFT,
+                    optimizer=optimizer, loss_scaler=loss_scaler,
+                    epoch=epoch, mode="best", SFT=True,
+                )
+
+        if is_best:
+            max_score = val_score
+            best_epoch = epoch
+            best_csv_path = os.path.join(output_task_dir, "predictions_val.csv")
+            pred_outputs.to_csv(best_csv_path, index=False, encoding="utf-8-sig")
+            if args.output_dir and args.savemodel:
+                misc.save_model(
+                    args=args, model=model, model_without_ddp=model_without_ddp,
+                    optimizer=optimizer, loss_scaler=loss_scaler,
+                    epoch=epoch, mode="best", SFT=False,
                 )
 
         print(f"Best epoch = {best_epoch}, Best score = {max_score:.4f}")
@@ -593,12 +651,28 @@ def main(args, criterion):
     # Final Test (Best Ckpt)
     # =========================
     ckpt_path = os.path.join(args.output_dir, args.task, "checkpoint-best.pth")
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
-    model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
+    if not os.path.isfile(ckpt_path) and args.SFT:
+        legacy_sft_path = os.path.join(
+            args.output_dir, args.task, f"{best_epoch}_checkpoint-best.pth"
+        )
+        if os.path.isfile(legacy_sft_path):
+            ckpt_path = legacy_sft_path
+
+    if os.path.isfile(ckpt_path):
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
+        final_epoch = checkpoint.get("epoch", best_epoch)
+        print(f"Loaded best checkpoint: {ckpt_path}")
+    else:
+        final_epoch = args.epochs - 1
+        print(
+            f"Warning: no saved best checkpoint found at {ckpt_path}; "
+            "using the final in-memory model for evaluation."
+        )
     model.to(device)
 
-    if os.path.exists(os.path.join(args.data_path, "final_val")):
-        print(f"Val test with the best model from epoch {checkpoint.get('epoch', -1)}:")
+    if has_final_val:
+        print(f"Val test with the best model from epoch {final_epoch}:")
         _val_stats, _val_auc_roc, pred_outputs = evaluate(
             data_loader_final_val, model, device, args, -1, mode="val",
             num_class=args.nb_classes, log_writer=None
@@ -606,7 +680,7 @@ def main(args, criterion):
         csv_path = os.path.join(args.output_dir, args.task, f'predictions_val.csv')
         pred_outputs.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
-    print(f"Test with the best model, epoch = {checkpoint.get('epoch', -1)}:")
+    print(f"Test with the best model, epoch = {final_epoch}:")
     _test_stats, _auc_roc, pred_outputs = evaluate(
         data_loader_test, model, device, args, -1, mode="test",
         num_class=args.nb_classes, log_writer=None

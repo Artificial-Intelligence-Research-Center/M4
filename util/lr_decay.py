@@ -27,7 +27,7 @@ def param_groups_lrd(model, weight_decay=0.05, no_weight_decay_list=[], layer_de
             continue
 
         # no decay: all 1D parameters and model specific ones
-        if p.ndim == 1 or n in no_weight_decay_list:
+        if p.ndim == 1 or n in no_weight_decay_list or n.endswith(("lora_A", "lora_B")):
             g_decay = "no_decay"
             this_decay = 0.
         else:
@@ -71,4 +71,4 @@ def get_layer_id_for_vit(name, num_layers):
     elif name.startswith('blocks'):
         return int(name.split('.')[1]) + 1
     else:
-        return num_layers
+        return num_layers

@@ -10,14 +10,15 @@ SFT_FOLDERS = [
     # "sft_imagenet_models"
     # "imagenet_sft_models_0430"
     # "redo_SFT_0601"
-    "odir_SFT_models_0716"
+    "odir_SFT_models_0820"
 ]
 
 
 SFT_DATASET = [
     # "SFT_AOD",
     # "imagenet",
-    "odir",
+    # "odir",
+    "odir_multilabel",
 ]
 
 
@@ -25,7 +26,12 @@ CLASS_MAP = {
     "APTOS2019": "5", "MESSIDOR2": "5", "IDRiD_data": "5",
     "Glaucoma_fundus": "3", "PAPILA": "3", "Retina": "4",
     "MIL": "2", "SL": "2", "HK": "23", "SFT_AOD": "8",
-    "imagenet": "1000", "odir": "8"
+    "imagenet": "1000", "odir": "8", "odir_multilabel": "8"
+}
+
+
+MULTILABEL_CLASSES = {
+    "odir_multilabel": "N,D,G,C,A,H,M,O",
 }
 
 
@@ -104,7 +110,7 @@ def get_model_info(model_path):
         
 
 if __name__ == "__main__":
-    output_dir = "odir_SFT_models_0716"
+    output_dir = "odir_multilabel_SFT_models_0820"
 
     # 0. 先收集所有模型檔案
     sft_models = []
@@ -130,6 +136,13 @@ if __name__ == "__main__":
             
             data_path = f"./data/{cur_dataset}"
             task_id = f"{model_arch}_{cur_model.replace('/', '_')}_{cur_dataset}"
+            classification_args = ""
+            if cur_dataset in MULTILABEL_CLASSES:
+                classification_args = (
+                    "--classification_type multi_label "
+                    f"--multilabel_classes {MULTILABEL_CLASSES[cur_dataset]} "
+                    "--multilabel_threshold 0.5 "
+                )
             
             # Default
             # cmd = (
@@ -157,9 +170,21 @@ if __name__ == "__main__":
                 f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
                 f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 --warmup_epochs 10 "
                 f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
+                f"{classification_args}"
                 f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation finetune --SFT"
             )
             tasks.append((cmd, task_id))
+
+            # # MAE-lora
+            # cmd = (
+            #     f"python main_finetune.py "
+            #     f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
+            #     f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 --warmup_epochs 10 "
+            #     f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
+            #     f"{classification_args}"
+            #     f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation lora --lora_rank 8 --lora_alpha 16 --lora_dropout 0.05 --lora_target qkv --SFT"
+            # )
+            # tasks.append((cmd, task_id))
 
 
     # 2. 自動偵測 GPU 數量
