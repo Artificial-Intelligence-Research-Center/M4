@@ -32,11 +32,12 @@ TEST_FOLDERS = [
     # "dinov2_vitb14_gastronet_0609"
     # "ours_dinov2_vitb14_0623" 
     # "dinov3_base"
-    "baseline_models"
+    # "baseline_models"
     # "sft_checkpoints_0625"
     # "our_exp"
     # "HK_sft_models_0630",
     # "odir_SFT_models_DFT_0716"
+    "odir_multilabel_sft_models_DFT_0824"
 ]
 
 TEST_DATASETS = [
@@ -49,7 +50,7 @@ TEST_DATASETS = [
     # "MIL",
     # "SL",
     # "HK",
-    # "ROP"
+    "ROP"
 ]
 
 
@@ -142,18 +143,20 @@ if __name__ == "__main__":
     # output_dir = "HK_sft_models_0630"
     # output_dir = "odir_SFT_models_DFT_0716"
     # output_dir = "dinov2_vitb14_ours"
-    output_dir = "lora_DFT_0818"
+    # output_dir = "lora_DFT_0818"
+    # output_dir = "test"
+    output_dir = "odir_multilabel_sft_models_DFT_0824"
 
     # 0. 先收集所有模型檔案
     test_models = []
     # test_models.extend(
     #     [
-    #         'RETFound_mae_natureCFP',
-    #         'RETFound_mae_meh',
-    #         'RETFound_mae_shanghai',
-    #         'RETFound_dinov2_meh',
-    #         'RETFound_dinov2_shanghai'
-    #     ]
+            # 'RETFound_mae_natureCFP',
+            # 'RETFound_mae_meh',
+            # 'RETFound_mae_shanghai',
+            # 'RETFound_dinov2_meh',
+            # 'RETFound_dinov2_shanghai'
+        # ]
     # )
     for path in TEST_FOLDERS:
         model_ckpts = [f for f in os.listdir(path) if f.endswith((".pth", ".pt"))]

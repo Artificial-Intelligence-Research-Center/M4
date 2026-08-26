@@ -22,6 +22,8 @@ dinov2_base_ours/
 dinov3_base/
 gastroscopy_baseline/
 sft_checkpoints_0625/
+odir*/
+lora_DFT*/
 
 
 # Checkpoints

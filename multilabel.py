@@ -91,7 +91,7 @@ def evaluate_multilabel(data_loader, model, device, args, epoch, mode, num_class
     }
     metrics["roc_auc"], valid_auc_classes = _macro_auc(targets, probabilities)
     metrics["average_precision"], valid_ap_classes = _macro_average_precision(targets, probabilities)
-    score_values = [metrics[name] for name in ("macro_f1", "roc_auc", "average_precision")]
+    score_values = [metrics[name] for name in ("roc_auc")]
     metrics["score"] = float(np.mean([value for value in score_values if np.isfinite(value)]))
 
     if log_writer:

@@ -7,12 +7,12 @@ import GPUtil
 # ==== 配置設定 ====
 TEST_FOLDERS = [
     # "gas_loss_exp",
-    "baseline_models",
+    # "baseline_models",
     # "gastro_dinov3"
     # "our_dinov3"
-    "gastroscopy_baseline",
+    # "gastroscopy_baseline",
     # "our_pixio_dis"
-    "dinov2_base",
+    # "dinov2_base",
     # "dinov3_cs"
     # "dinov3_0414"
     # "sft_default_param",
@@ -30,6 +30,13 @@ TEST_FOLDERS = [
     # "experiment_redo"
     # "redo_SFT_finetune_0601"
     # "dinov2_vitb14_gastronet_0609"
+    # "ours_dinov2_vitb14_0623" 
+    # "dinov3_base"
+    # "baseline_models"
+    # "sft_checkpoints_0625"
+    # "our_exp"
+    # "HK_sft_models_0630",
+    "odir_SFT_models_DFT_0716"
 ]
 
 TEST_DATASETS = [
@@ -39,16 +46,17 @@ TEST_DATASETS = [
     # "Glaucoma_fundus",
     # "PAPILA",
     # "Retina",
-    # "MIL",
+    "MIL",
     "SL",
     # "HK",
+    # "ROP"
 ]
 
 
 CLASS_MAP = {
     "APTOS2019": "5", "MESSIDOR2": "5", "IDRiD_data": "5",
     "Glaucoma_fundus": "3", "PAPILA": "3", "Retina": "4",
-    "MIL": "2", "SL": "2", "HK": "23",
+    "MIL": "2", "SL": "2", "HK": "23", "ROP": "6"
 }
 
 def get_free_gpus():
@@ -106,9 +114,11 @@ def get_model_info(model_path):
         return "RETFound_dinov2", "retfound_dinov2"
     elif "gastronet_dinov2" in model_path.lower():
         return "GastroNet", "gastro_dinov2"
+    elif "dinov3_vitb16" in model_path.lower():
+        return "Dinov3", "dinov3_vitb16"
     elif "dinov3" in model_path.lower():
         return "Dinov3", "dinov3_vitl16"
-    elif "dinov2_vitb14" in model_path.lower():
+    elif "dinov2_vitb14" in model_path.lower() or "dinov2_base" in model_path.lower():
         return "Dinov2", "dinov2_vitb14"
     elif "dinov2" in model_path.lower():
         return "Dinov2", "dinov2_vitl14"
@@ -127,7 +137,11 @@ if __name__ == "__main__":
     # output_dir = "test"
     # output_dir = "redo_SFT_finetune_0601"
     # output_dir = "dinov2_vitb14_gastronet_0609"
-    output_dir = "gastroscopy_baseline_finetune_0612"
+    # output_dir = "gastroscopy_dinov3_base_0623"
+    # output_dir = "our_exp"
+    # output_dir = "HK_sft_models_0630"
+    # output_dir = "odir_SFT_models_DFT_0716"
+    output_dir = "dinov2_vitb14_ours"
 
     # 0. 先收集所有模型檔案
     test_models = []
@@ -182,16 +196,16 @@ if __name__ == "__main__":
                 #     tasks.append((cmd, task_id))
 
                 # MAE
-                cmd = (
-                    f"python main_finetune.py "
-                    f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
-                    f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 "
-                    f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
-                    f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation finetune"
-                )
-                if not os.path.exists(f"{output_dir}/mae_param/{task_id}"):
-                    print(f"加入任務: {task_id}")
-                    tasks.append((cmd, task_id))
+                # cmd = (
+                #     f"python main_finetune.py "
+                #     f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
+                #     f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 "
+                #     f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
+                #     f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation finetune"
+                # )
+                # if not os.path.exists(f"{output_dir}/mae_param/{task_id}"):
+                #     print(f"加入任務: {task_id}")
+                #     tasks.append((cmd, task_id))
 
 
     # 2. 自動偵測 GPU 數量

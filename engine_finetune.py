@@ -90,6 +90,7 @@ def train_one_epoch(
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+
 @torch.no_grad()
 def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_writer):
     """Evaluate the model."""
@@ -135,7 +136,8 @@ def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_write
     precision = precision_score(true_onehot, pred_onehot, zero_division=0, average='macro')
     recall = recall_score(true_onehot, pred_onehot, zero_division=0, average='macro')
     
-    score = (f1 + roc_auc + kappa) / 3
+    # score = (f1 + roc_auc + kappa) / 3
+    score = roc_auc
     if log_writer:
         for metric_name, value in zip(['accuracy', 'f1', 'roc_auc', 'hamming', 'jaccard', 'precision', 'recall', 'average_precision', 'kappa', 'score'],
                                        [accuracy, f1, roc_auc, hamming, jaccard, precision, recall, average_precision, kappa, score]):
