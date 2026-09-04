@@ -182,7 +182,7 @@ if __name__ == "__main__":
                 f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 --warmup_epochs 5 "
                 f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
                 f"{classification_args}"
-                f"--output_dir {output_dir}/mae_param_lora --input_size 224 --task {task_id} --adaptation lora --lora_rank 8 --lora_alpha 16 --lora_dropout 0.05 --lora_target qkv --SFT --save_iter 5"
+                f"--output_dir {output_dir}/mae_param_lora --input_size 224 --task {task_id} --adaptation lora --lora_rank 8 --lora_alpha 16 --lora_dropout 0.05 --lora_target qkv --SFT --save_iter 250"
             )
             tasks.append((cmd, task_id))
 
