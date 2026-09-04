@@ -199,15 +199,27 @@ if __name__ == "__main__":
                 #     print(f"加入任務: {task_id}")
                 #     tasks.append((cmd, task_id))
 
+                # MAE-non lora
+                cmd = (
+                    f"python main_finetune.py "
+                    f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
+                    f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 "
+                    f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
+                    f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation finetune"
+                )
+                if not os.path.exists(f"{output_dir}/mae_param/{task_id}"):
+                    print(f"加入任務: {task_id}")
+                    tasks.append((cmd, task_id))
+
                 # MAE
                 cmd = (
                     f"python main_finetune.py "
                     f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
                     f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 "
                     f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
-                    f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation lora --lora_rank 8 --lora_alpha 16 --lora_dropout 0.05 --lora_target qkv"
+                    f"--output_dir {output_dir}/mae_param_lora --input_size 224 --task {task_id} --adaptation lora --lora_rank 8 --lora_alpha 16 --lora_dropout 0.05 --lora_target qkv"
                 )
-                if not os.path.exists(f"{output_dir}/mae_param/{task_id}"):
+                if not os.path.exists(f"{output_dir}/mae_param_lora/{task_id}"):
                     print(f"加入任務: {task_id}")
                     tasks.append((cmd, task_id))
 

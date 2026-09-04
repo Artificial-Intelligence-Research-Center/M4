@@ -100,7 +100,8 @@ if __name__ == "__main__":
         'Retina',
         # 'HK',
         # 'MIL',
-        # 'SL'
+        # 'SL',
+        'ROP'
     ]
 
     # Initialize a dictionary to store the results

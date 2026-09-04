@@ -110,7 +110,7 @@ def get_model_info(model_path):
         
 
 if __name__ == "__main__":
-    output_dir = "odir_multilabel_SFT_models_0820"
+    output_dir = "odir_multilabel_SFT_models_0904"
 
     # 0. 先收集所有模型檔案
     sft_models = []
@@ -168,23 +168,23 @@ if __name__ == "__main__":
             cmd = (
                 f"python main_finetune.py "
                 f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
-                f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 --warmup_epochs 10 "
+                f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 --warmup_epochs 5 "
                 f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
                 f"{classification_args}"
-                f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation finetune --SFT"
+                f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation finetune --SFT --save_iter 250"
             )
             tasks.append((cmd, task_id))
 
             # # MAE-lora
-            # cmd = (
-            #     f"python main_finetune.py "
-            #     f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
-            #     f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 --warmup_epochs 10 "
-            #     f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
-            #     f"{classification_args}"
-            #     f"--output_dir {output_dir}/mae_param --input_size 224 --task {task_id} --adaptation lora --lora_rank 8 --lora_alpha 16 --lora_dropout 0.05 --lora_target qkv --SFT"
-            # )
-            # tasks.append((cmd, task_id))
+            cmd = (
+                f"python main_finetune.py "
+                f"--model {model_name} --model_arch {model_arch} --finetune {cur_model} "
+                f"--savemodel --global_pool --batch_size 32 --accum_iter 2 --drop_path 0.1 --epochs 50 --warmup_epochs 5 "
+                f"--nb_classes {num_class} --data_path {data_path} --blr 1e-3 --layer_decay 0.75 "
+                f"{classification_args}"
+                f"--output_dir {output_dir}/mae_param_lora --input_size 224 --task {task_id} --adaptation lora --lora_rank 8 --lora_alpha 16 --lora_dropout 0.05 --lora_target qkv --SFT --save_iter 5"
+            )
+            tasks.append((cmd, task_id))
 
 
     # 2. 自動偵測 GPU 數量

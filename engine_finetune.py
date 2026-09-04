@@ -29,7 +29,12 @@ def train_one_epoch(
     max_norm: float = 0,
     mixup_fn: Optional[Mixup] = None,
     log_writer=None,
-    args=None
+    args=None,
+    model_without_ddp=None,
+    data_loader_val=None,
+    evaluate_fn=None,
+    num_class=None,
+    iter_state=None,
 ):
     """Train the model for one epoch."""
     model.train(True)
@@ -40,7 +45,10 @@ def train_one_epoch(
     
     if log_writer:
         print(f'log_dir: {log_writer.log_dir}')
-    
+
+    save_iter = getattr(args, "save_iter", 0)
+    iters_per_epoch = len(data_loader)
+
     for data_iter_step, (samples, targets, _) in enumerate(metric_logger.log_every(data_loader, print_freq, f'Epoch: [{epoch}]')):
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
@@ -85,7 +93,63 @@ def train_one_epoch(
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
             log_writer.add_scalar('loss/train', loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('lr', max_lr, epoch_1000x)
-    
+
+        # ---- Evaluate & save checkpoint every N iterations ----
+        if (
+            save_iter > 0
+            and (data_iter_step + 1) % save_iter == 0
+        ):
+            global_iter = epoch * iters_per_epoch + data_iter_step + 1
+            print(f"[save_iter] Global iter {global_iter} (epoch {epoch}, step {data_iter_step + 1})")
+
+            # --- evaluation ---
+            if evaluate_fn is not None and data_loader_val is not None:
+                model.eval()
+                _, val_score, pred_outputs = evaluate_fn(
+                    data_loader_val, model, device, args,
+                    epoch=global_iter, mode="val",
+                    num_class=num_class, log_writer=log_writer,
+                )
+                model.train(True)
+
+                output_task_dir = os.path.join(args.output_dir, args.task)
+                os.makedirs(output_task_dir, exist_ok=True)
+
+                if args.SFT:
+                    iter_csv = os.path.join(output_task_dir, f"predictions_iter{global_iter}.csv")
+                    pred_outputs.to_csv(iter_csv, index=False, encoding="utf-8-sig")
+
+                is_best_iter = (iter_state is not None) and (val_score > iter_state["max_score"])
+                if is_best_iter:
+                    iter_state["max_score"] = val_score
+                    iter_state["best_iter"] = global_iter
+                    best_csv = os.path.join(output_task_dir, "predictions_val.csv")
+                    pred_outputs.to_csv(best_csv, index=False, encoding="utf-8-sig")
+                    print(f"[save_iter] New best score {val_score:.4f} at iter {global_iter}")
+
+                print(f"[save_iter] Best iter = {iter_state['best_iter'] if iter_state else '-'}, "
+                      f"Best score = {iter_state['max_score'] if iter_state else '-'}")
+            else:
+                is_best_iter = False
+
+            # --- save checkpoint ---
+            if model_without_ddp is not None and getattr(args, "output_dir", None) and getattr(args, "savemodel", False):
+                if is_best_iter:
+                    # 覆寫 best checkpoint
+                    misc.save_model(
+                        args=args, epoch=epoch, model=model,
+                        model_without_ddp=model_without_ddp,
+                        optimizer=optimizer, loss_scaler=loss_scaler,
+                        mode="iter", global_iter=global_iter,
+                    )
+                else:
+                    misc.save_model(
+                        args=args, epoch=epoch, model=model,
+                        model_without_ddp=model_without_ddp,
+                        optimizer=optimizer, loss_scaler=loss_scaler,
+                        mode="iter", global_iter=global_iter,
+                    )
+
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

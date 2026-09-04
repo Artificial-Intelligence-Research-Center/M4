@@ -96,7 +96,7 @@ def get_args_parser():
                         help="Base LR: lr = blr * total_batch_size / 256")
     parser.add_argument("--layer_decay", type=float, default=0.65, help="Layer-wise LR decay (ViT)")
     parser.add_argument("--min_lr", type=float, default=1e-6, metavar="LR", help="Lower LR bound")
-    parser.add_argument("--warmup_epochs", type=int, default=10, metavar="N", help="Warmup epochs")
+    parser.add_argument("--warmup_epochs", type=int, default=5, metavar="N", help="Warmup epochs")
 
     # ---- Augmentation
     parser.add_argument("--color_jitter", type=float, default=None, metavar="PCT")
@@ -183,6 +183,10 @@ def get_args_parser():
     parser.add_argument("--enhance", action="store_true", default=False)
     parser.add_argument("--datasets_seed", default=2026, type=int)
     parser.add_argument("--SFT", action="store_true", default=False, help="Save model each epoch for SFT")
+    parser.add_argument(
+        "--save_iter", type=int, default=0,
+        help="Save a checkpoint every N training iterations (0 = disabled)."
+    )
 
     return parser
 
@@ -591,6 +595,9 @@ def main(args, criterion):
     max_score = float("-inf")
     best_epoch = 0
 
+    # iter_state 用於 save_iter 模式下跨 iteration 追蹤最佳分數
+    iter_state = {"max_score": float("-inf"), "best_iter": 0} if args.save_iter > 0 else None
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
@@ -599,8 +606,26 @@ def main(args, criterion):
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, mixup_fn,
-            log_writer=log_writer, args=args
+            log_writer=log_writer, args=args,
+            model_without_ddp=model_without_ddp,
+            data_loader_val=data_loader_val if args.save_iter > 0 else None,
+            evaluate_fn=evaluate if args.save_iter > 0 else None,
+            num_class=args.nb_classes,
+            iter_state=iter_state,
         )
+
+        output_task_dir = os.path.join(args.output_dir, args.task)
+        os.makedirs(output_task_dir, exist_ok=True)
+
+        # save_iter > 0：evaluation 已在 iteration 內完成，epoch 層級跳過 evaluate 與存檔
+        if args.save_iter > 0:
+            log_stats = {**{f"train_{k}": v for k, v in train_stats.items()},
+                         "epoch": epoch,
+                         "n_parameters": n_parameters}
+            if args.output_dir and misc.is_main_process():
+                with open(os.path.join(args.output_dir, args.task, "log.txt"), "a", encoding="utf-8") as f:
+                    f.write(json.dumps(log_stats) + "\n")
+            continue
 
         val_stats, val_score, pred_outputs = evaluate(
             data_loader_val, model, device, args, epoch, mode="val",
@@ -608,8 +633,6 @@ def main(args, criterion):
         )
 
         is_best = val_score > max_score
-        output_task_dir = os.path.join(args.output_dir, args.task)
-        os.makedirs(output_task_dir, exist_ok=True)
 
         if args.SFT:
             epoch_csv_path = os.path.join(output_task_dir, f"predictions_epoch_{epoch}.csv")
@@ -650,13 +673,18 @@ def main(args, criterion):
     # =========================
     # Final Test (Best Ckpt)
     # =========================
-    ckpt_path = os.path.join(args.output_dir, args.task, "checkpoint-best.pth")
-    if not os.path.isfile(ckpt_path) and args.SFT:
-        legacy_sft_path = os.path.join(
-            args.output_dir, args.task, f"{best_epoch}_checkpoint-best.pth"
-        )
-        if os.path.isfile(legacy_sft_path):
-            ckpt_path = legacy_sft_path
+    if args.save_iter > 0 and iter_state is not None:
+        best_iter = iter_state["best_iter"]
+        ckpt_path = os.path.join(args.output_dir, args.task, f"checkpoint-iter{best_iter}.pth")
+        print(f"[save_iter] Best iter = {best_iter}, loading: {ckpt_path}")
+    else:
+        ckpt_path = os.path.join(args.output_dir, args.task, "checkpoint-best.pth")
+        if not os.path.isfile(ckpt_path) and args.SFT:
+            legacy_sft_path = os.path.join(
+                args.output_dir, args.task, f"{best_epoch}_checkpoint-best.pth"
+            )
+            if os.path.isfile(legacy_sft_path):
+                ckpt_path = legacy_sft_path
 
     if os.path.isfile(ckpt_path):
         checkpoint = torch.load(ckpt_path, map_location="cpu")

@@ -287,12 +287,24 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
     return total_norm
 
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mode, SFT=False):
+def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mode, SFT=False, global_iter=None):
     output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
     os.makedirs(os.path.join(args.output_dir, args.task), exist_ok=True)
     if loss_scaler is not None:
-        if mode == 'best':
+        if mode == 'iter':
+            checkpoint_path = os.path.join(args.output_dir, args.task, f'checkpoint-iter{global_iter}.pth')
+            to_save = {
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch,
+                'global_iter': global_iter,
+                'scaler': loss_scaler.state_dict(),
+                'args': args,
+            }
+            save_on_master(to_save, checkpoint_path)
+            return
+        elif mode == 'best':
             if not SFT:
                 checkpoint_paths = [os.path.join(args.output_dir, args.task, f'checkpoint-best.pth')]
             else:
@@ -321,7 +333,18 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mo
 
             save_on_master(to_save, checkpoint_path)
     else:
-        if mode == 'best':
+        if mode == 'iter':
+            checkpoint_path = os.path.join(args.output_dir, args.task, f'checkpoint-iter{global_iter}.pth')
+            to_save = {
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch,
+                'global_iter': global_iter,
+                'args': args,
+            }
+            torch.save(to_save, checkpoint_path)
+            return
+        elif mode == 'best':
             to_save = {
                 'model': model_without_ddp.state_dict(),
                 'epoch': epoch, }
