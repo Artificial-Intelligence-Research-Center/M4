@@ -95,11 +95,12 @@ def train_one_epoch(
             log_writer.add_scalar('lr', max_lr, epoch_1000x)
 
         # ---- Evaluate & save checkpoint every N iterations ----
+        global_iter = epoch * iters_per_epoch + data_iter_step + 1
         if (
             save_iter > 0
-            and (data_iter_step + 1) % save_iter == 0
+            # and (data_iter_step + 1) % save_iter == 0
+            and global_iter % save_iter == 0
         ):
-            global_iter = epoch * iters_per_epoch + data_iter_step + 1
             print(f"[save_iter] Global iter {global_iter} (epoch {epoch}, step {data_iter_step + 1})")
 
             # --- evaluation ---
